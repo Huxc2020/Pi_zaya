@@ -24,7 +24,7 @@ from kb.chunking import chunk_markdown
 from kb.config import load_settings
 from kb.library_store import LibraryStore
 from kb.llm import DeepSeekChat
-from kb.pdf_tools import PdfMetaSuggestion, build_base_name, ensure_dir, extract_pdf_meta_suggestion, open_in_explorer, run_pdf_to_md
+from kb.pdf_tools import PDF_META_EXTRACT_VERSION, PdfMetaSuggestion, build_base_name, ensure_dir, extract_pdf_meta_suggestion, open_in_explorer, run_pdf_to_md
 from kb.prefs import load_prefs, save_prefs
 from kb.retriever import BM25Retriever
 from kb.store import load_all_chunks
@@ -302,6 +302,34 @@ pre{ border-radius: 12px !important; }
   margin: 0 0 0.55rem 0;
   line-height: 1.35;
 }
+.kb-modal-overlay{
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.40);
+  z-index: 999;
+}
+.kb-modal{
+  position: fixed;
+  top: 7vh;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(980px, 92vw);
+  max-height: 86vh;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid rgba(49,51,63,0.18);
+  border-radius: 16px;
+  padding: 14px 14px 10px 14px;
+  z-index: 1000;
+  box-shadow: 0 22px 60px rgba(15, 23, 42, 0.35);
+}
+.kb-modal h3{
+  margin: 0.2rem 0 0.65rem 0;
+  font-size: 1.08rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+.kb-modal .refbox{ margin-top: 0.35rem; }
 .msg-meta{ color: rgba(49,51,63,0.62); font-size: 0.86rem; margin-bottom: 0.35rem; }
 .hr{ height:1px; background: rgba(49,51,63,0.10); margin: 1.0rem 0; }
 /* Small "generation details" text (GPT-ish, no chain-of-thought) */
@@ -2411,6 +2439,98 @@ def _cleanup_tmp_uploads(pdf_dir: Path) -> int:
     return n
 
 
+def _sanitize_filename_component(s: str) -> str:
+    s = (s or "").strip()
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r'[<>:"/\\\\|?*]+', "-", s)
+    s = s.replace("\u0000", "").strip()
+    s = s.strip(" .-_")
+    return s
+
+
+def _is_normalized_pdf_stem(stem: str) -> bool:
+    """
+    Heuristic: venue-year-title (at least has a 4-digit year between dashes).
+    """
+    t = (stem or "").strip()
+    if not t:
+        return False
+    if len(t) < 12:
+        return False
+    return bool(re.search(r"-.?(19\d{2}|20\d{2}).?-", t))
+
+
+def _unique_pdf_path(pdf_dir: Path, base: str) -> Path:
+    base = _sanitize_filename_component(base) or "paper"
+    dest = Path(pdf_dir) / f"{base}.pdf"
+    if not dest.exists():
+        return dest
+    k = 2
+    while (Path(pdf_dir) / f"{base}-{k}.pdf").exists() and k < 999:
+        k += 1
+    return Path(pdf_dir) / f"{base}-{k}.pdf"
+
+
+def _list_pdf_paths_fast(pdf_dir: Path) -> list[Path]:
+    """
+    Fast non-recursive PDF listing.
+    Avoids per-file Path.stat() calls (important on large folders / slow disks).
+    """
+    pdf_dir = Path(pdf_dir)
+    out: list[Path] = []
+    try:
+        with os.scandir(pdf_dir) as it:
+            for e in it:
+                try:
+                    if not e.is_file():
+                        continue
+                    if not e.name.lower().endswith(".pdf"):
+                        continue
+                    out.append(Path(e.path))
+                except Exception:
+                    continue
+    except Exception:
+        # Fallback for unusual FS errors.
+        try:
+            out = [x for x in pdf_dir.glob("*.pdf") if x.is_file()]
+        except Exception:
+            out = []
+    return out
+
+
+def _select_recent_pdf_paths(pdf_dir: Path, n: int) -> list[Path]:
+    """
+    Select N most-recently modified PDFs (non-recursive).
+    This still needs to read mtimes, so keep it off the hot path; call only on explicit user actions.
+    """
+    import heapq
+
+    n = int(n or 0)
+    if n <= 0:
+        return []
+
+    heap: list[tuple[float, str]] = []
+    try:
+        with os.scandir(Path(pdf_dir)) as it:
+            for e in it:
+                try:
+                    if not e.is_file():
+                        continue
+                    if not e.name.lower().endswith(".pdf"):
+                        continue
+                    mt = float(e.stat().st_mtime)
+                    heapq.heappush(heap, (mt, e.path))
+                    if len(heap) > n:
+                        heapq.heappop(heap)
+                except Exception:
+                    continue
+    except Exception:
+        return []
+
+    heap.sort(reverse=True)
+    return [Path(p) for _, p in heap]
+
+
 def _page_chat(settings, chat_store: ChatStore, retriever: BM25Retriever, top_k: int, temperature: float, max_tokens: int, show_context: bool, deep_read: bool) -> None:
     st.subheader(S["chat"])
     _inject_copy_js()
@@ -2823,6 +2943,14 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
     ensure_dir(pdf_dir)
     ensure_dir(md_out_root)
 
+    # List PDFs early (used by the rename manager + listing below).
+    # Keep it fast: avoid stat() for sorting here.
+    try:
+        pdfs = _list_pdf_paths_fast(pdf_dir)
+        pdfs.sort(key=lambda p: p.name.lower())
+    except Exception:
+        pdfs = []
+
     # Background status (visible and non-blocking)
     bg = _bg_snapshot()
     if bg.get("running") or (bg.get("total", 0) and bg.get("done", 0) < bg.get("total", 0)):
@@ -2847,8 +2975,45 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
             if last:
                 st.caption(f"\u6700\u8fd1\u4e00\u6761\uff1a{last}")
 
+    # Prompt once when user selects a directory that likely needs naming cleanup.
+    try:
+        dir_sig = str(Path(pdf_dir).expanduser().resolve())
+    except Exception:
+        dir_sig = str(pdf_dir)
+    dismissed = st.session_state.setdefault("rename_prompt_dismissed_dirs", set())
+    if isinstance(dismissed, set) and (dir_sig not in dismissed) and pdfs:
+        # Show prompt only when we see at least a few "non-normalized" names.
+        non_norm = 0
+        for p in pdfs[:40]:
+            if p.name.lower().startswith("__upload__"):
+                continue
+            if not _is_normalized_pdf_stem(p.stem):
+                non_norm += 1
+            if non_norm >= 3:
+                break
+        if non_norm >= 3:
+            st.markdown(
+                "<div class='kb-notice'>检测到你设置了新的 PDF 目录：其中有些文件名可能不是「期刊-年份-标题」。要不要我根据 PDF 内容识别信息并给出重命名建议？</div>",
+                unsafe_allow_html=True,
+            )
+            c_p = st.columns([1.1, 1.0, 10])
+            with c_p[0]:
+                if st.button("查看建议", key="rename_prompt_open"):
+                    st.session_state["rename_mgr_open"] = True
+                    st.session_state["rename_scan_trigger"] = False
+                    st.session_state["rename_scan_scope"] = "最近 30 个"
+                    st.session_state["rename_scan_use_llm"] = False
+                    st.experimental_rerun()
+            with c_p[1]:
+                if st.button("以后再说", key="rename_prompt_dismiss"):
+                    try:
+                        dismissed.add(dir_sig)
+                    except Exception:
+                        pass
+                    st.experimental_rerun()
+
     st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
-    cols = st.columns([1, 1, 1])
+    cols = st.columns([1, 1, 1, 1])
     with cols[0]:
         if st.button(S["open_dir"], key="open_pdf_dir"):
             open_in_explorer(pdf_dir)
@@ -2866,6 +3031,298 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
         if st.button(S["cleanup"], key="cleanup_btn"):
             n = _cleanup_tmp_uploads(pdf_dir)
             st.info(f"{S['run_ok']}: cleaned {n} tmp uploads")
+    with cols[3]:
+        if st.button("文件名管理", key="rename_mgr_btn", help="根据 PDF 内容识别「期刊-年份-标题」并建议重命名"):
+            st.session_state["rename_mgr_open"] = True
+            st.session_state["rename_scan_trigger"] = False
+            st.experimental_rerun()
+
+    # "Small window" rename manager (modal-like overlay).
+    if "rename_mgr_open" not in st.session_state:
+        st.session_state["rename_mgr_open"] = False
+    if "rename_scan_trigger" not in st.session_state:
+        st.session_state["rename_scan_trigger"] = False
+    if "rename_scan_scope" not in st.session_state:
+        st.session_state["rename_scan_scope"] = "最近 30 个"
+    if "rename_scan_use_llm" not in st.session_state:
+        st.session_state["rename_scan_use_llm"] = False
+
+    if bool(st.session_state.get("rename_mgr_open")):
+        # If meta extraction heuristics changed, invalidate any cached suggestions/results in this session.
+        expected_ver = str(PDF_META_EXTRACT_VERSION)
+        if str(st.session_state.get("rename_mgr_cache_ver") or "") != expected_ver:
+            st.session_state["rename_mgr_cache_ver"] = expected_ver
+            st.session_state.pop("rename_pdf_meta_cache", None)
+            st.session_state.pop("rename_scan_results_cache", None)
+
+        # NOTE: Streamlit markdown cannot truly "wrap" widgets into an HTML modal.
+        # A fixed overlay can block clicks and make users feel "stuck".
+        # Use an in-page expander panel instead (fast, reliable, closable).
+        with st.expander("PDF 文件名管理（期刊-年份-标题）", expanded=True):
+            c_top = st.columns([1.0, 1.8, 1.6, 1.6, 6.0])
+            with c_top[0]:
+                if st.button("关闭", key="rename_mgr_close"):
+                    st.session_state["rename_mgr_open"] = False
+                    st.session_state["rename_scan_trigger"] = False
+                    st.experimental_rerun()
+            with c_top[1]:
+                _scope_opts = ["最近 30 个", "最近 50 个", "最近 100 个", "全部"]
+                _cur_scope = str(st.session_state.get("rename_scan_scope") or "最近 30 个")
+                _scope_idx = _scope_opts.index(_cur_scope) if _cur_scope in _scope_opts else 0
+                scope = st.selectbox(
+                    "扫描范围",
+                    options=_scope_opts,
+                    index=_scope_idx,
+                    key="rename_scan_scope",
+                )
+            with c_top[2]:
+                st.checkbox("只显示需改名", value=True, key="rename_only_diff")
+            with c_top[3]:
+                st.checkbox("同时改名 MD", value=False, key="rename_also_md", help="如果已生成 Markdown，会把对应文件夹/主 md 尝试一起改名")
+
+            use_llm = bool(st.session_state.get("rename_scan_use_llm"))
+            with c_top[4]:
+                st.checkbox("识别用 LLM（更准）", value=use_llm, key="rename_scan_use_llm", help="只在关键信息缺失时少量调用 LLM 补全（更准但更慢）")
+
+            # Scan button
+            c_scan = st.columns([1.2, 8.8])
+            with c_scan[0]:
+                clicked_scan = st.button("开始识别/刷新", key="rename_scan_btn")
+            with c_scan[1]:
+                st.markdown(
+                    "<div class='refbox'>我会读取 PDF 内容（不是看文件名）来识别「期刊/会议、年份、标题」，然后给出建议文件名。你可以手动编辑后再应用。</div>",
+                    unsafe_allow_html=True,
+                )
+
+        # Cache key for scan results (include extractor version to avoid stale meta after upgrades).
+        scope_s = str(scope or "")
+        llm_flag = "llm1" if bool(st.session_state.get("rename_scan_use_llm")) else "llm0"
+        scan_key = hashlib.sha1((dir_sig + "|" + scope_s + "|" + llm_flag + "|ver:" + expected_ver).encode("utf-8", "ignore")).hexdigest()[:16]
+        results_cache = st.session_state.setdefault("rename_scan_results_cache", {})
+        results = results_cache.get(scan_key)
+
+        # IMPORTANT: only scan when the user explicitly clicks the button.
+        # Auto-scanning can block the UI and make the panel feel "stuck".
+        trigger = bool(clicked_scan)
+        if trigger:
+            meta_cache = st.session_state.setdefault("rename_pdf_meta_cache", {})
+            out_rows: list[dict] = []
+            # Only build the scan list when the user explicitly requests a scan.
+            if scope_s.startswith("最近"):
+                try:
+                    n_scope = int(re.sub(r"\D+", "", scope_s) or "50")
+                except Exception:
+                    n_scope = 50
+                scan_pdfs = _select_recent_pdf_paths(pdf_dir, max(1, n_scope))
+            else:
+                scan_pdfs = list(pdfs)
+
+            total = len(scan_pdfs)
+            prog = st.progress(0.0) if total > 0 else None
+            llm_budget = 8
+            llm_used = 0
+            with st.spinner(f"正在识别 PDF 信息（{total} 个）..."):
+                for i, pdf in enumerate(scan_pdfs, start=1):
+                    if pdf.name.lower().startswith("__upload__"):
+                        continue
+                    try:
+                        st_m = float(pdf.stat().st_mtime)
+                        st_s = int(pdf.stat().st_size)
+                    except Exception:
+                        st_m, st_s = 0.0, 0
+                    cache_k = hashlib.sha1(
+                        (str(pdf) + "|" + str(st_m) + "|" + str(st_s) + "|" + llm_flag + "|ver:" + expected_ver).encode("utf-8", "ignore")
+                    ).hexdigest()[:16]
+                    sugg = meta_cache.get(cache_k)
+                    if not isinstance(sugg, PdfMetaSuggestion):
+                        try:
+                            # Fast pass first (heuristics only).
+                            sugg = extract_pdf_meta_suggestion(pdf, settings=None)
+                            # Optional refinement with a small budget to avoid UI "freezing".
+                            if bool(st.session_state.get("rename_scan_use_llm")) and settings:
+                                needs = (not (sugg.title or "").strip()) or (not (sugg.year or "").strip()) or (not (sugg.venue or "").strip())
+                                if needs and llm_used < llm_budget:
+                                    sugg2 = extract_pdf_meta_suggestion(pdf, settings=settings)
+                                    if sugg2:
+                                        sugg = sugg2
+                                    llm_used += 1
+                        except Exception:
+                            sugg = PdfMetaSuggestion()
+                        meta_cache[cache_k] = sugg
+                    base = build_base_name(venue=sugg.venue, year=sugg.year, title=sugg.title)
+                    base = (base or "").strip()
+                    diff = bool(base) and (base != pdf.stem)
+                    out_rows.append(
+                        {
+                            "path": str(pdf),
+                            "old": pdf.name,
+                            "old_stem": pdf.stem,
+                            "suggest": base,
+                            "diff": diff,
+                            "meta": {"venue": sugg.venue, "year": sugg.year, "title": sugg.title},
+                        }
+                    )
+                    if prog is not None:
+                        prog.progress(min(1.0, i / max(1, total)))
+            if prog is not None:
+                prog.empty()
+            results_cache[scan_key] = out_rows
+            results = out_rows
+        elif results is None:
+            st.caption("点击「开始识别/刷新」后才会读取 PDF 进行识别（避免打开窗口就卡住）。")
+
+        # Render results
+        rows = list(results or [])
+        only_diff = bool(st.session_state.get("rename_only_diff"))
+        if only_diff:
+            rows = [r for r in rows if bool(r.get("diff"))]
+
+        if not rows:
+            st.caption("（没有需要改名的文件，或识别不到可用信息）")
+        else:
+            st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
+            st.caption(f"共 {len(rows)} 条建议（只会在你点击“应用重命名”后真正改名）")
+
+            # Bulk select
+            c_bulk = st.columns([1.4, 1.4, 7.2])
+            with c_bulk[0]:
+                if st.button("全选", key="rename_sel_all"):
+                    for r in rows:
+                        uid = hashlib.md5(str(r.get("path") or "").encode("utf-8", "ignore")).hexdigest()[:10]
+                        st.session_state[f"rename_sel_{uid}"] = True
+                    st.experimental_rerun()
+            with c_bulk[1]:
+                if st.button("全不选", key="rename_sel_none"):
+                    for r in rows:
+                        uid = hashlib.md5(str(r.get("path") or "").encode("utf-8", "ignore")).hexdigest()[:10]
+                        st.session_state[f"rename_sel_{uid}"] = False
+                    st.experimental_rerun()
+            with c_bulk[2]:
+                st.caption("建议格式：期刊-年份-标题（可编辑）")
+
+            for r in rows[:400]:
+                p = str(r.get("path") or "")
+                uid = hashlib.md5(p.encode("utf-8", "ignore")).hexdigest()[:10]
+                old = str(r.get("old") or "")
+                suggest = str(r.get("suggest") or "")
+                meta = r.get("meta") or {}
+                venue = str((meta or {}).get("venue") or "")
+                year = str((meta or {}).get("year") or "")
+                title = str((meta or {}).get("title") or "")
+
+                st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
+                c_row = st.columns([0.9, 4.9, 5.6, 1.6])
+                with c_row[0]:
+                    st.checkbox("选择", value=bool(st.session_state.get(f"rename_sel_{uid}", False)), key=f"rename_sel_{uid}")
+                with c_row[1]:
+                    st.markdown(f"<div class='meta-kv'><b>当前</b>：{html.escape(old)}</div>", unsafe_allow_html=True)
+                    meta_line = " | ".join([x for x in [venue, year, title[:80] + ("…" if len(title) > 80 else "")] if x])
+                    if meta_line:
+                        st.caption(f"识别：{meta_line}")
+                with c_row[3]:
+                    pdf_path = Path(p)
+                    if st.button("打开", key=f"rename_open_{uid}", help="打开 PDF 查看"):
+                        try:
+                            os.startfile(str(pdf_path))  # type: ignore[attr-defined]
+                        except Exception:
+                            try:
+                                open_in_explorer(pdf_path)
+                            except Exception as e:
+                                st.warning(f"打开失败：{e}")
+                    if st.button("定位", key=f"rename_loc_{uid}", help="在资源管理器中定位"):
+                        try:
+                            open_in_explorer(pdf_path)
+                        except Exception as e:
+                            st.warning(f"定位失败：{e}")
+                with c_row[2]:
+                    if not suggest:
+                        st.caption("（识别不到可用信息，跳过）")
+                    else:
+                        st.text_input("建议新文件名（不含 .pdf）", value=suggest, key=f"rename_new_{uid}")
+
+            # Apply rename
+            st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
+            c_apply = st.columns([1.8, 8.2])
+            with c_apply[0]:
+                if st.button("应用重命名", key="rename_apply_btn"):
+                    ops = []
+                    also_md = bool(st.session_state.get("rename_also_md"))
+                    for r in rows:
+                        p = str(r.get("path") or "")
+                        uid = hashlib.md5(p.encode("utf-8", "ignore")).hexdigest()[:10]
+                        if not bool(st.session_state.get(f"rename_sel_{uid}", False)):
+                            continue
+                        src = Path(p)
+                        if not src.exists():
+                            ops.append(("fail", f"不存在：{src}"))
+                            continue
+                        new_base = str(st.session_state.get(f"rename_new_{uid}") or "").strip()
+                        new_base = _sanitize_filename_component(new_base)
+                        if not new_base:
+                            ops.append(("skip", f"跳过（空名字）：{src.name}"))
+                            continue
+                        if new_base == src.stem:
+                            ops.append(("skip", f"跳过（未变化）：{src.name}"))
+                            continue
+                        dest = _unique_pdf_path(pdf_dir, new_base)
+                        try:
+                            src.rename(dest)
+                            try:
+                                lib_store.update_path(src, dest)
+                            except Exception:
+                                pass
+                            ops.append(("ok", f"{src.name} → {dest.name}"))
+                        except Exception as e:
+                            ops.append(("fail", f"{src.name} 重命名失败：{e}"))
+                            continue
+
+                        if also_md:
+                            try:
+                                old_folder = Path(md_out_root) / src.stem
+                                new_folder = Path(md_out_root) / dest.stem
+                                if old_folder.exists() and (not new_folder.exists()):
+                                    old_folder.rename(new_folder)
+                                    old_main = new_folder / f"{src.stem}.en.md"
+                                    if old_main.exists():
+                                        new_main = new_folder / f"{dest.stem}.en.md"
+                                        try:
+                                            old_main.rename(new_main)
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+
+                    # Clear scan cache for this dir so the list refreshes next time.
+                    try:
+                        results_cache.pop(scan_key, None)
+                    except Exception:
+                        pass
+                    # Do not auto-rescan; let the user click "开始识别/刷新" to refresh suggestions.
+
+                    ok_n = sum(1 for s, _ in ops if s == "ok")
+                    fail_n = sum(1 for s, _ in ops if s == "fail")
+                    if ok_n:
+                        st.success(f"已重命名：{ok_n} 个文件")
+                    if fail_n:
+                        st.warning(f"失败：{fail_n} 个文件（可能是文件正被占用）")
+                    if ops:
+                        with st.expander("查看详情", expanded=False):
+                            for stt, msg in ops[:200]:
+                                (st.caption if stt in ("ok", "skip") else st.warning)(msg)
+
+                    # After applying, dismiss the prompt for this dir.
+                    try:
+                        dismissed.add(dir_sig)
+                    except Exception:
+                        pass
+                    st.experimental_rerun()
+            with c_apply[1]:
+                st.markdown(
+                    "<div class='refbox'>提示：如果你已经把某些 PDF 转换成 MD 并且已经建库，重命名后建议点一次「更新知识库」重新索引，以免旧路径残留。</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # end expander
 
     st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
     st.subheader(S["convert_opts"])
@@ -2875,17 +3332,28 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
     st.subheader("\u5df2\u6709\u6587\u732e")
     st.caption("\u672a\u8f6c\u6362\u7684\u4f1a\u663e\u793a\u5728\u201c\u672a\u8f6c\u6362\u201d\uff0c\u53ef\u4e00\u952e\u6279\u91cf\u8f6c\u6362\u3002\u8f6c\u6362\u4efb\u52a1\u4f1a\u5728\u540e\u53f0\u8fd0\u884c\uff0c\u4e0d\u4f1a\u5361\u4f4f\u9875\u9762\u3002")
 
-    try:
-        pdfs = sorted([x for x in Path(pdf_dir).glob('*.pdf') if x.is_file()], key=lambda x: x.stat().st_mtime, reverse=True)
-    except Exception:
-        pdfs = []
-
     if not pdfs:
         st.caption("\uff08\u8fd8\u6ca1\u6709\u627e\u5230 PDF\uff09")
     else:
+        # Avoid blocking the UI when the folder is huge: show a fast subset by default.
+        scope_opt = st.selectbox(
+            "\u5217\u8868\u8303\u56f4",
+            options=["200\uff08\u66f4\u5feb\uff09", "500", "\u5168\u90e8\uff08\u53ef\u80fd\u8f83\u6162\uff09"],
+            index=0,
+            key="lib_pdf_list_scope",
+        )
+        if scope_opt.startswith("200"):
+            pdfs_view = pdfs[:200]
+        elif scope_opt.startswith("500"):
+            pdfs_view = pdfs[:500]
+        else:
+            pdfs_view = pdfs
+        if len(pdfs_view) < len(pdfs):
+            st.caption(f"\u4e3a\u4fdd\u8bc1\u901f\u5ea6\uff0c\u5f53\u524d\u4ec5\u5c55\u793a {len(pdfs_view)}/{len(pdfs)} \u4e2a PDF\u3002")
+
         converted = []
         pending = []
-        for pdf in pdfs:
+        for pdf in pdfs_view:
             md_folder = Path(md_out_root) / pdf.stem
             md_main = md_folder / f"{pdf.stem}.en.md"
             md_exists = md_main.exists()
@@ -2903,7 +3371,7 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
         tabs = st.tabs([
             f"\u672a\u8f6c\u6362 ({len(pending)})",
             f"\u5df2\u8f6c\u6362 ({len(converted)})",
-            f"\u5168\u90e8 ({len(pdfs)})",
+            f"\u5f53\u524d\u5217\u8868 ({len(pdfs_view)})",
         ])
 
         def render_items(items: list[dict], *, show_missing_badge: bool, key_ns: str) -> None:

@@ -19,6 +19,11 @@ class PdfMetaSuggestion:
     title: str = ""
 
 
+# Bump this whenever the PDF meta extraction heuristics change in a way that should
+# invalidate any UI/session caches that store extracted metadata.
+PDF_META_EXTRACT_VERSION = "2026-02-09.1"
+
+
 def ensure_dir(p: Path) -> None:
     Path(p).mkdir(parents=True, exist_ok=True)
 
@@ -126,30 +131,52 @@ def _guess_year(text: str) -> str:
 
 def _guess_venue(text: str) -> str:
     t = " ".join((text or "").split())
-    patterns = [
-        r"ACM\s+TOG\b",
-        r"ACM\s+Trans(?:actions)?\.?\s+Graph(?:ics)?\.?",
-        r"ACM\s+Transactions\s+on\s+Graphics",
-        r"Proc\.\s+ACM\s+Comput\.\s+Graph\.\s+Interact\.\s+Tech\.",
-        r"IEEE\s+Transactions\s+on\s+[A-Za-z ]+",
-        r"IEEE\s+Trans\.\s+Pattern\s+Anal\.\s+Mach\.\s+Intell\.",
-        r"IEEE\s+Trans\.\s+Image\s+Process\.",
-        r"Nature",
-        r"Science",
-        r"Optics\s+Express",
-        r"Applied\s+Optics",
-        r"CVPR\s+\d{4}",
-        r"ICCV\s+\d{4}",
-        r"ECCV\s+\d{4}",
-        r"NeurIPS\s+\d{4}",
-        r"ICLR\s+\d{4}",
-        r"SIGGRAPH(?:\s+Asia)?\s+\d{4}",
-        r"arXiv",
+    # IMPORTANT: order matters (match more specific venues before generic ones).
+    # Example: "Science Advances" must not be collapsed to "Science".
+    patterns: list[tuple[str, str | None]] = [
+        # Science family (specific) — must come before generic Science markers.
+        (r"\bScience\s+Advances\b", "Science Advances"),
+        (r"\bSci\.\s*Adv\.\b", "Science Advances"),
+        (r"\badvances\.science(?:mag)?\.org\b", "Science Advances"),
+        (r"\bscienceadvances\.org\b", "Science Advances"),
+
+        # Nature family (specific) — must come before generic Nature markers.
+        (r"\bNature\s+Communications\b", "Nature Communications"),
+        (r"\bNat\.\s*Commun\.\b", "Nature Communications"),
+
+        # Strong publisher/header markers (avoid "Computer Science"/"Optical Science" false matches)
+        (r"\bnature\.com\b", "Nature"),
+        (r"\bNature\s*\|\s*Vol\b", "Nature"),
+        (r"\bscience\.org\b", "Science"),
+        (r"\bScience\s*\|\s*Vol\b", "Science"),
+        (r"\bAAAS\b", "Science"),
+
+        # Optics / imaging journals
+        (r"\bOptics\s+Express\b", "Optics Express"),
+        (r"\bApplied\s+Optics\b", "Applied Optics"),
+        (r"\bAppl\.\s*Opt\.\b", "Applied Optics"),
+        # ACM / IEEE (keep existing patterns)
+        (r"ACM\s+TOG\b", None),
+        (r"ACM\s+Trans(?:actions)?\.?\s+Graph(?:ics)?\.?", None),
+        (r"ACM\s+Transactions\s+on\s+Graphics", None),
+        (r"Proc\.\s+ACM\s+Comput\.\s+Graph\.\s+Interact\.\s+Tech\.", None),
+        (r"IEEE\s+Trans\.\s+Pattern\s+Anal\.\s+Mach\.\s+Intell\.", None),
+        (r"IEEE\s+Trans\.\s+Image\s+Process\.", None),
+        (r"IEEE\s+Transactions\s+on\s+[A-Za-z ]+", None),
+        # Conferences (with year if present)
+        (r"\bCVPR\s+\d{4}\b", None),
+        (r"\bICCV\s+\d{4}\b", None),
+        (r"\bECCV\s+\d{4}\b", None),
+        (r"\bNeurIPS\s+\d{4}\b", None),
+        (r"\bICLR\s+\d{4}\b", None),
+        (r"\bSIGGRAPH(?:\s+Asia)?\s+\d{4}\b", None),
+        # Preprints
+        (r"\barXiv\b", "arXiv"),
     ]
-    for pat in patterns:
+    for pat, canon in patterns:
         m = re.search(pat, t, flags=re.IGNORECASE)
         if m:
-            return m.group(0)
+            return canon or m.group(0)
 
     # Proceedings long-form (map to short venue when possible)
     m = re.search(r"Proceedings\s+of\s+the\s+IEEE/CVF\s+Conference\s+on\s+Computer\s+Vision\s+and\s+Pattern\s+Recognition", t, flags=re.IGNORECASE)

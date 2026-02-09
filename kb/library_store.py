@@ -56,3 +56,13 @@ class LibraryStore:
                 (sha1, path_s, now),
             )
 
+    def update_path(self, old_path: Path, new_path: Path) -> int:
+        """
+        Best-effort path update when a PDF file is renamed/moved on disk.
+        Returns affected rows count.
+        """
+        old_s = str(Path(old_path))
+        new_s = str(Path(new_path))
+        with self._connect() as conn:
+            cur = conn.execute("UPDATE pdf_files SET path = ? WHERE path = ?", (new_s, old_s))
+            return int(getattr(cur, "rowcount", 0) or 0)
