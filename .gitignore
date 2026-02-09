@@ -1,0 +1,20 @@
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local virtualenv
+.venv/
+
+# Local DB / prefs (per-user, should not be shared)
+chat.sqlite3
+library.sqlite3
+user_prefs.json
+db/
+
+# OS
+.DS_Store
+Thumbs.db
