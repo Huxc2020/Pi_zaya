@@ -69,11 +69,29 @@ $env:DEEPSEEK_MODEL="deepseek-chat"
 - 如果你的目录是通过 `git clone` 得来的，`run.ps1` 会在启动前自动 `git pull`（有 git 的情况下）
 - 然后再启动 Streamlit
 
-如果你想手动更新也可以：
+如果你想手动更新也可以（推荐在启动前做一次）：
 
 ```powershell
 git pull --rebase
 ```
+
+如果你也参与一起改代码（协作开发），请用 “分支 + PR” 的方式，避免直接在 `main` 上改：
+
+```powershell
+# 先切到 main 并拉最新
+git checkout main
+git pull --rebase
+
+# 开新分支做改动
+git checkout -b feature/your-change
+
+# 改完提交并推送分支
+git add .
+git commit -m "your change"
+git push -u origin feature/your-change
+```
+
+然后去 GitHub 页面发起 Pull Request（PR），我会 review 后合并。
 
 ---
 
