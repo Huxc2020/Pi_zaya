@@ -20,6 +20,19 @@ BG_STATE = {
 BG_THREAD: Optional[threading.Thread] = None
 
 
+# QA worker state used by newer app.py implementations.
+QA_LOCK = threading.Lock()
+QA_STATE: dict[str, object] = {
+    "queue": [],
+    "running": False,
+    "current": None,
+    "cancel_id": "",
+    "recent": [],
+    "last": "",
+}
+QA_THREAD: Optional[threading.Thread] = None
+
+
 GEN_LOCK = threading.Lock()
 GEN_TASKS: dict[str, dict] = {}
 
