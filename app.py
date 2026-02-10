@@ -2951,29 +2951,14 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
     except Exception:
         pdfs = []
 
-    # Background status (visible and non-blocking)
+    # Background status: keep it non-blocking and compact here.
+    # Detailed progress bar is rendered under the conversion section ("已有文献") for better UX when scrolling.
     bg = _bg_snapshot()
     if bg.get("running") or (bg.get("total", 0) and bg.get("done", 0) < bg.get("total", 0)):
-        done = int(bg.get("done", 0) or 0)
-        total = int(bg.get("total", 0) or 0)
-        cur = bg.get("current", "")
-        st.markdown("<div class='refbox'>\u540e\u53f0\u8f6c\u6362\u4efb\u52a1\u8fd0\u884c\u4e2d\uff0c\u4f60\u53ef\u4ee5\u76f4\u63a5\u5207\u6362\u5230\u201c\u5bf9\u8bdd\u201d\u9875\u3002</div>", unsafe_allow_html=True)
-        if total > 0:
-            st.progress(min(1.0, done / max(1, total)))
-        st.caption(f"\u8fdb\u5ea6\uff1a{done}/{total}  {(' | ' + cur) if cur else ''}")
-        c_bg = st.columns([1, 1, 2])
-        with c_bg[0]:
-            if st.button("\u5237\u65b0\u72b6\u6001", key="bg_refresh"):
-                st.experimental_rerun()
-        with c_bg[1]:
-            if st.button("\u505c\u6b62\u540e\u53f0\u8f6c\u6362", key="bg_cancel"):
-                _bg_cancel_all()
-                st.info("\u5df2\u53d1\u9001\u505c\u6b62\u8bf7\u6c42\u3002")
-                st.experimental_rerun()
-        with c_bg[2]:
-            last = (bg.get("last") or "").strip()
-            if last:
-                st.caption(f"\u6700\u8fd1\u4e00\u6761\uff1a{last}")
+        st.markdown(
+            "<div class='refbox'>\u540e\u53f0\u8f6c\u6362\u4efb\u52a1\u8fd0\u884c\u4e2d\uff1a\u8bf7\u5728\u4e0b\u65b9\u201c\u5df2\u6709\u6587\u732e\u201d\u533a\u57df\u67e5\u770b\u8fdb\u5ea6\u6761\u3002</div>",
+            unsafe_allow_html=True,
+        )
 
     # Prompt once when user selects a directory that likely needs naming cleanup.
     try:
@@ -3374,6 +3359,34 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
             f"\u5f53\u524d\u5217\u8868 ({len(pdfs_view)})",
         ])
 
+        def render_bg_progress_under_tasks(*, key_ns: str) -> None:
+            """
+            Render background conversion progress where users are looking: under conversion tasks.
+            """
+            bg2 = _bg_snapshot()
+            running = bool(bg2.get("running")) or (bg2.get("total", 0) and bg2.get("done", 0) < bg2.get("total", 0))
+            if not running:
+                return
+            done = int(bg2.get("done", 0) or 0)
+            total = int(bg2.get("total", 0) or 0)
+            cur = str(bg2.get("current") or "")
+            last = str(bg2.get("last") or "").strip()
+            st.markdown("<div class='refbox'>\u540e\u53f0\u8f6c\u6362\u8fdb\u5ea6</div>", unsafe_allow_html=True)
+            st.caption(f"{done}/{total}{(' | ' + cur) if cur else ''}")
+            if total > 0:
+                st.progress(min(1.0, done / max(1, total)))
+            c_bg = st.columns([1.0, 1.0, 6.0])
+            with c_bg[0]:
+                if st.button("\u5237\u65b0", key=f"bg_refresh_under_{key_ns}"):
+                    st.experimental_rerun()
+            with c_bg[1]:
+                if st.button("\u505c\u6b62", key=f"bg_cancel_under_{key_ns}"):
+                    _bg_cancel_all()
+                    st.experimental_rerun()
+            with c_bg[2]:
+                if last:
+                    st.caption(f"\u6700\u8fd1\u4e00\u6761\uff1a{last}")
+
         def render_items(items: list[dict], *, show_missing_badge: bool, key_ns: str) -> None:
             from typing import Optional
 
@@ -3495,15 +3508,18 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
                         st.info(f"\u5df2\u628a {len(pending)} \u4e2a\u6587\u4ef6\u52a0\u5165\u540e\u53f0\u961f\u5217\u3002")
                         st.experimental_rerun()
                 with c_bulk[1]:
-                    st.markdown("<div class='refbox'>\u8f6c\u6362\u4f1a\u5728\u540e\u53f0\u8fd0\u884c\uff0c\u4f60\u53ef\u4ee5\u76f4\u63a5\u5207\u6362\u5230\u201c\u5bf9\u8bdd\u201d\u9875\u3002\u9700\u8981\u770b\u8fdb\u5ea6\uff0c\u770b\u9875\u9762\u9876\u90e8\u7684\u540e\u53f0\u8fdb\u5ea6\u6761\u3002</div>", unsafe_allow_html=True)
+                    st.markdown("<div class='refbox'>\u8f6c\u6362\u4f1a\u5728\u540e\u53f0\u8fd0\u884c\uff0c\u4f60\u53ef\u4ee5\u76f4\u63a5\u5207\u6362\u5230\u201c\u5bf9\u8bdd\u201d\u9875\u3002</div>", unsafe_allow_html=True)
+                render_bg_progress_under_tasks(key_ns="tab_pending")
                 render_items(pending, show_missing_badge=True, key_ns="tab_pending")
             else:
                 st.caption("\u5168\u90e8\u90fd\u5df2\u8f6c\u6362\u3002")
 
         with tabs[1]:
+            render_bg_progress_under_tasks(key_ns="tab_done")
             render_items(converted, show_missing_badge=False, key_ns="tab_done")
 
         with tabs[2]:
+            render_bg_progress_under_tasks(key_ns="tab_all")
             render_items(pending + converted, show_missing_badge=True, key_ns="tab_all")
 
     st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
