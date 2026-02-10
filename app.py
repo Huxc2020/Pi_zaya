@@ -3511,7 +3511,23 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
             auto = st.checkbox("\u81ea\u52a8\u5237\u65b0\u8fdb\u5ea6", value=bool(st.session_state.get(auto_key)), key=auto_key)
             if auto and running:
                 components.html(
-                    "<script>setTimeout(function(){try{window.parent.location.reload();}catch(e){}}, 2000);</script>",
+                    """
+<script>
+(function () {
+  try {
+    const root = window.parent;
+    if (!root) return;
+    if (root._kbAutoRefreshTimer) return;
+    root._kbAutoRefreshTimer = setTimeout(function () {
+      try {
+        root._kbAutoRefreshTimer = null;
+        root.postMessage({ isStreamlitMessage: true, type: "streamlit:rerunScript" }, "*");
+      } catch (e) {}
+    }, 1500);
+  } catch (e) {}
+})();
+</script>
+                    """,
                     height=0,
                 )
 
@@ -3717,10 +3733,11 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
                         st.experimental_rerun()
                 with c_bulk[1]:
                     st.markdown("<div class='refbox'>\u8f6c\u6362\u4f1a\u5728\u540e\u53f0\u8fd0\u884c\uff0c\u4f60\u53ef\u4ee5\u76f4\u63a5\u5207\u6362\u5230\u201c\u5bf9\u8bdd\u201d\u9875\u3002</div>", unsafe_allow_html=True)
-                render_bg_progress_under_tasks(key_ns="tab_pending")
                 render_items(pending, show_missing_badge=True, key_ns="tab_pending")
             else:
                 st.caption("\u5168\u90e8\u90fd\u5df2\u8f6c\u6362\u3002")
+            # Always render progress *under* the list (user expects it here).
+            render_bg_progress_under_tasks(key_ns="tab_pending_bottom")
 
         with tabs[1]:
             render_bg_progress_under_tasks(key_ns="tab_done")
