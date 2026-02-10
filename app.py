@@ -667,7 +667,7 @@ def _bg_ensure_started() -> None:
     t = threading.Thread(target=_bg_worker_loop, daemon=True)
     RUNTIME.BG_THREAD = t
     t.start()
-def _init_theme_css() -> None:
+def _init_theme_css_legacy() -> None:
     st.markdown(
         """
 <style>
@@ -1254,6 +1254,122 @@ body[data-theme="dark"] .refslist div.stButton > button:active{
 
 /* Make <pre> relative for overlay button */
 pre { position: relative; }
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def _init_theme_css(theme_mode: str = "dark") -> None:
+    # 1. 根据传入的 mode 决定颜色变量
+    if theme_mode == "light":
+        # === 浅色模式变量 ===
+        css_vars = """
+        --bg: #ffffff;
+        --panel: #f0f2f6;
+        --text-main: #31333F;
+        --text-muted: rgba(49, 51, 63, 0.64);
+        --line: rgba(49, 51, 63, 0.2);
+        --btn-bg: #ffffff;
+        --btn-border: rgba(49, 51, 63, 0.2);
+        --btn-text: #31333F;
+        --btn-hover: #f0f2f6;
+        --input-bg: #ffffff;
+        --input-border: rgba(49, 51, 63, 0.2);
+        --msg-user-bg: #eaf2ff;
+        --msg-user-border: rgba(47,111,237,0.18);
+        --msg-ai-color: #31333F;
+
+        --pill-ok-bg: #d1fae5; --pill-ok: #065f46;
+        --pill-warn-bg: #fef3c7; --pill-warn: #92400e;
+        --pill-run-bg: #dbeafe; --pill-run: #1e40af;
+        """
+        sidebar_bg = "#f0f2f6"
+    else:
+        # === 深色模式变量  ===
+        css_vars = """
+        --bg: #0e1117;
+        --panel: #262730;
+        --text-main: #fafafa;
+        --text-muted: rgba(250, 250, 250, 0.60);
+        --line: rgba(250, 250, 250, 0.15);
+        --btn-bg: #1a1c24;
+        --btn-border: rgba(255, 255, 255, 0.20);
+        --btn-text: #ffffff;
+        --btn-hover: rgba(255, 255, 255, 0.10);
+        --input-bg: #000000;
+        --input-border: rgba(255, 255, 255, 0.20);
+        --msg-user-bg: #1e3a8a;
+        --msg-user-border: rgba(59, 130, 246, 0.4);
+        --msg-ai-color: #fafafa;
+
+        --pill-ok-bg: rgba(22, 163, 74, 0.20); --pill-ok: #4ade80;
+        --pill-warn-bg: rgba(245, 158, 11, 0.20); --pill-warn: #fbbf24;
+        --pill-run-bg: rgba(29, 78, 216, 0.30); --pill-run: #60a5fa;
+        """
+        sidebar_bg = "#262730"
+
+    # 2. 注入全局 CSS
+    st.markdown(
+        f"""
+<style>
+/* 定义变量 */
+:root {{
+    {css_vars}
+    --font-body: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+}}
+
+/* 应用背景和文字颜色 */
+html, body {{ background-color: var(--bg) !important; color: var(--text-main) !important; font-family: var(--font-body); }}
+
+/* 强制修正侧边栏背景 */
+section[data-testid="stSidebar"] > div:first-child {{
+    background-color: {sidebar_bg} !important;
+    border-right: 1px solid var(--line) !important;
+}}
+
+/* 侧边栏顶部空白消除 */
+section[data-testid="stSidebar"] .block-container {{
+    padding-top: 1rem !important;
+    margin-top: -3rem !important;
+}}
+section[data-testid="stSidebar"] h3 {{ margin-top: 0 !important; }}
+
+/* 通用组件 */
+h1, h2, h3, h4, h5, h6, span, div, p, li {{ color: var(--text-main); }}
+small, .stCaption {{ color: var(--text-muted) !important; }}
+
+div.stButton > button {{
+  background: var(--btn-bg) !important;
+  border: 1px solid var(--btn-border) !important;
+  color: var(--btn-text) !important;
+  border-radius: 12px;
+}}
+div.stButton > button:hover {{ background: var(--btn-hover) !important; }}
+
+textarea, input[type="text"], div[data-testid="stTextInput"] input, div[data-testid="stSelectbox"] > div > div {{
+    background-color: var(--input-bg) !important;
+    color: var(--text-main) !important;
+    border: 1px solid var(--input-border) !important;
+    border-radius: 12px !important;
+}}
+
+ul[data-testid="stSelectboxVirtualDropdown"] {{ background-color: var(--bg) !important; }}
+li[data-testid="stSelectboxVirtualDropdownOption"] {{ color: var(--text-main) !important; }}
+
+.msg-user {{
+  background: var(--msg-user-bg);
+  border: 1px solid var(--msg-user-border);
+  color: var(--text-main) !important;
+  border-radius: 16px; padding: 10px 14px; margin-left: auto;
+}}
+.msg-ai {{ color: var(--msg-ai-color) !important; }}
+
+pre {{ background: var(--bg) !important; border: 1px solid var(--line); }}
+code {{ color: var(--text-main) !important; }}
+.kb-notice {{ background: var(--pill-warn-bg); color: var(--pill-warn); border: 1px solid var(--line); border-radius: 10px; padding: 0.5rem; }}
+.refbox {{ color: var(--text-muted); }}
+div[data-testid="stProgress"] > div > div {{ background-color: var(--line) !important; }}
 </style>
 """,
         unsafe_allow_html=True,
@@ -5156,7 +5272,9 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
 
 def main() -> None:
     st.set_page_config(page_title=S["title"], layout="wide")
-    _init_theme_css()
+    if "ui_theme" not in st.session_state:
+        st.session_state["ui_theme"] = "light"
+    _init_theme_css(st.session_state["ui_theme"])
     st.title(S["title"])
 
     settings = load_settings()
@@ -5197,7 +5315,14 @@ def main() -> None:
     retriever_reload_flag: dict[str, bool] = {"reload": False}
 
     with st.sidebar:
-        st.subheader(S["settings"])
+        c_mode = st.columns([3, 1])
+        with c_mode[0]:
+            st.subheader(S["settings"])
+        with c_mode[1]:
+            btn_icon = "🌞" if st.session_state["ui_theme"] == "dark" else "🌙"
+            if st.button(btn_icon, key="theme_toggle_btn"):
+                st.session_state["ui_theme"] = "light" if st.session_state["ui_theme"] == "dark" else "dark"
+                st.experimental_rerun()
 
         # Background conversion status (shown on every page)
         _bg_ensure_started()
@@ -5365,4 +5490,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
