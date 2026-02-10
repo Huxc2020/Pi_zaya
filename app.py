@@ -100,6 +100,9 @@ _BG_STATE = {
     "done": 0,
     "total": 0,
     "current": "",
+    "cur_page_done": 0,
+    "cur_page_total": 0,
+    "cur_page_msg": "",
     "cancel": False,
     "last": "",
 }
@@ -138,6 +141,9 @@ def _bg_remove_queued_tasks_for_pdf(pdf_path: Path) -> int:
 def _bg_cancel_all() -> None:
     with _BG_LOCK:
         _BG_STATE["cancel"] = True
+        _BG_STATE["cur_page_done"] = 0
+        _BG_STATE["cur_page_total"] = 0
+        _BG_STATE["cur_page_msg"] = ""
 
 
 def _bg_snapshot() -> dict:
@@ -165,9 +171,15 @@ def _bg_worker_loop() -> None:
                 task = _BG_STATE["queue"].pop(0)
                 _BG_STATE["running"] = True
                 _BG_STATE["current"] = str(task.get("name") or "")
+                _BG_STATE["cur_page_done"] = 0
+                _BG_STATE["cur_page_total"] = 0
+                _BG_STATE["cur_page_msg"] = ""
             else:
                 _BG_STATE["running"] = False
                 _BG_STATE["current"] = ""
+                _BG_STATE["cur_page_done"] = 0
+                _BG_STATE["cur_page_total"] = 0
+                _BG_STATE["cur_page_msg"] = ""
 
         if task is None:
             time.sleep(0.35)
@@ -193,12 +205,22 @@ def _bg_worker_loop() -> None:
                 except Exception:
                     pass
 
+            def _on_progress(page_done: int, page_total: int, msg: str = "") -> None:
+                with _BG_LOCK:
+                    try:
+                        _BG_STATE["cur_page_done"] = int(page_done or 0)
+                        _BG_STATE["cur_page_total"] = int(page_total or 0)
+                        _BG_STATE["cur_page_msg"] = str(msg or "")[:220]
+                    except Exception:
+                        pass
+
             ok, out_folder = run_pdf_to_md(
                 pdf_path=pdf,
                 out_root=out_root,
                 no_llm=no_llm,
                 keep_debug=False,
                 eq_image_fallback=False,
+                progress_cb=_on_progress,
             )
             msg = f"OK: {out_folder}" if ok else f"FAIL: {out_folder}"
 
@@ -3450,10 +3472,21 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
             total = int(bg2.get("total", 0) or 0)
             cur = str(bg2.get("current") or "")
             last = str(bg2.get("last") or "").strip()
+            p_done = int(bg2.get("cur_page_done", 0) or 0)
+            p_total = int(bg2.get("cur_page_total", 0) or 0)
+            p_msg = str(bg2.get("cur_page_msg") or "").strip()
             st.markdown("<div class='refbox'>\u540e\u53f0\u8f6c\u6362\u8fdb\u5ea6</div>", unsafe_allow_html=True)
             st.caption(f"{done}/{total}{(' | ' + cur) if cur else ''}")
             if total > 0:
                 st.progress(min(1.0, done / max(1, total)))
+            if p_total > 0:
+                st.caption(f"\u5f53\u524d\u6587\u4ef6\u9875\u8fdb\u5ea6\uff1a{p_done}/{p_total}")
+                st.progress(min(1.0, p_done / max(1, p_total)))
+            elif bool(bg2.get("running")):
+                st.caption("\u5f53\u524d\u6587\u4ef6\u5904\u7406\u4e2d\u2026")
+            if p_msg and bool(bg2.get("running")):
+                st.caption(p_msg)
+
             c_bg = st.columns([1.0, 1.0, 6.0])
             with c_bg[0]:
                 if st.button("\u5237\u65b0", key=f"bg_refresh_under_{key_ns}"):
@@ -3465,6 +3498,17 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
             with c_bg[2]:
                 if last:
                     st.caption(f"\u6700\u8fd1\u4e00\u6761\uff1a{last}")
+
+            # Auto refresh while running so the progress bar updates without manual clicks.
+            auto_key = "bg_auto_refresh"
+            if auto_key not in st.session_state:
+                st.session_state[auto_key] = True
+            auto = st.checkbox("\u81ea\u52a8\u5237\u65b0\u8fdb\u5ea6", value=bool(st.session_state.get(auto_key)), key=auto_key)
+            if auto and running:
+                components.html(
+                    "<script>setTimeout(function(){try{window.parent.location.reload();}catch(e){}}, 2000);</script>",
+                    height=0,
+                )
 
         def render_items(items: list[dict], *, show_missing_badge: bool, key_ns: str) -> None:
             from typing import Optional
@@ -3504,9 +3548,15 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
 
                     if running_this:
                         st.markdown("<span class='pill run'>\u8f6c\u6362\u4e2d</span>", unsafe_allow_html=True)
-                        if total > 0:
-                            st.progress(min(1.0, done / max(1, total)))
-                        st.caption(f"\u8fdb\u5ea6\uff1a{done}/{total}")
+                        # Show per-page progress for the current file when available.
+                        p_done = int(bg2.get("cur_page_done", 0) or 0)
+                        p_total = int(bg2.get("cur_page_total", 0) or 0)
+                        if p_total > 0:
+                            st.progress(min(1.0, p_done / max(1, p_total)))
+                            st.caption(f"\u9875\u8fdb\u5ea6\uff1a{p_done}/{p_total}")
+                        else:
+                            st.progress(0.0)
+                            st.caption("\u5904\u7406\u4e2d\u2026")
                     elif queued_pos is not None:
                         st.markdown("<span class='pill warn'>\u6392\u961f\u4e2d</span>", unsafe_allow_html=True)
                         st.caption(f"\u961f\u5217\u4f4d\u7f6e\uff1a{queued_pos}/{len(queue_tasks)}  |  \u540e\u53f0\u53ef\u7ee7\u7eed\u5207\u6362\u9875\u9762\u4f7f\u7528")

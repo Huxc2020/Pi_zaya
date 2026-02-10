@@ -7,7 +7,7 @@ import sys
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import fitz  # PyMuPDF
 
@@ -498,6 +498,7 @@ def run_pdf_to_md(
     no_llm: bool,
     keep_debug: bool,
     eq_image_fallback: bool,
+    progress_cb: Callable[[int, int, str], None] | None = None,
 ) -> tuple[bool, str]:
     """
     Convert a PDF into a markdown folder under out_root/pdf_stem.
@@ -525,7 +526,8 @@ def run_pdf_to_md(
 
         parts: list[str] = []
         try:
-            for i in range(int(getattr(doc, "page_count", 0) or 0)):
+            total_pages = int(getattr(doc, "page_count", 0) or 0)
+            for i in range(total_pages):
                 try:
                     page = doc.load_page(i)
                     txt = (page.get_text("text") or "").strip()
@@ -533,6 +535,11 @@ def run_pdf_to_md(
                     txt = ""
                 if txt:
                     parts.append(txt)
+                if progress_cb is not None:
+                    try:
+                        progress_cb(i + 1, total_pages, f"fallback page {i+1}/{total_pages}")
+                    except Exception:
+                        pass
         finally:
             try:
                 doc.close()
@@ -564,7 +571,8 @@ def run_pdf_to_md(
         # Collaborator-friendly fallback: still produce an .en.md so the app can run.
         return _fallback_convert()
 
-    args = [sys.executable, str(script), "--pdf", str(pdf_path), "--out", str(out_root)]
+    # -u: unbuffered, so we can parse per-page progress from stdout in real time.
+    args = [sys.executable, "-u", str(script), "--pdf", str(pdf_path), "--out", str(out_root)]
     if keep_debug:
         args.append("--keep-debug")
     if no_llm:
@@ -573,7 +581,49 @@ def run_pdf_to_md(
         args.append("--eq-image-fallback")
 
     try:
-        cp = subprocess.run(args, capture_output=True, text=True, check=False)
+        # Stream stdout so we can parse per-page progress emitted by the converter.
+        # Example lines:
+        # - "Detected body font size: ... | pages: 12 | range: 1-12"
+        # - "Processing page 3/12 ..."
+        p_total = 0
+        p_done = 0
+        cp_out = []
+        env = dict(os.environ)
+        env["PYTHONUNBUFFERED"] = "1"
+        proc = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+        assert proc.stdout is not None
+        re_pages = re.compile(r"\\bpages\\s*:\\s*(\\d+)\\b", flags=re.IGNORECASE)
+        re_prog = re.compile(r"Processing\\s+page\\s+(\\d+)\\s*/\\s*(\\d+)", flags=re.IGNORECASE)
+        for line in proc.stdout:
+            s = (line or "").rstrip()
+            if s:
+                cp_out.append(s)
+            m1 = re_pages.search(s)
+            if m1:
+                try:
+                    p_total = max(p_total, int(m1.group(1)))
+                except Exception:
+                    pass
+            m2 = re_prog.search(s)
+            if m2:
+                try:
+                    p_done = int(m2.group(1))
+                    p_total = max(p_total, int(m2.group(2)))
+                except Exception:
+                    pass
+            if progress_cb is not None and p_total > 0:
+                try:
+                    progress_cb(p_done, p_total, s)
+                except Exception:
+                    pass
+        rc = int(proc.wait() or 0)
     except Exception as e:
         # If the external converter is misconfigured on collaborator machines, don't hard-fail.
         ok2, out2 = _fallback_convert()
@@ -581,12 +631,12 @@ def run_pdf_to_md(
             return True, out2
         return False, str(e)
 
-    if cp.returncode != 0:
-        tail = (cp.stderr or cp.stdout or "").strip()[-800:]
+    if rc != 0:
+        tail = "\n".join(cp_out).strip()[-800:]
         # Fall back to built-in extraction so users still get something usable.
         ok2, out2 = _fallback_convert()
         if ok2:
             return True, out2
-        return False, f"exit={cp.returncode} {tail}"
+        return False, f"exit={rc} {tail}"
 
     return True, str(out_root / pdf_path.stem)
