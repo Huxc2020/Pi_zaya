@@ -2415,11 +2415,12 @@ def _refs_cache2_key(prompt: str, *, top_k: int, settings) -> str:
         db_mtime = st.session_state.get("db_mtime") or 0
     except Exception:
         db_mtime = 0
-    deep_flag = "1" if bool(st.session_state.get("deep_read")) else "0"
     llm_flag = "1" if bool(st.session_state.get("llm_rerank")) else "0"
     trans_flag = "1" if bool(getattr(settings, "api_key", None)) else "0"
-    REFS_CACHE_VER = "v9"
-    sig = REFS_CACHE_VER + "|" + p + "|" + str(int(top_k)) + "|" + str(db_mtime) + "|" + deep_flag + "|" + llm_flag + "|" + trans_flag
+    # Cache key should be stable across reruns. Don't depend on UI toggles that may flip during generation.
+    # (We may still *compute* refs using deep-read, but the key must stay stable so refs won't "disappear".)
+    REFS_CACHE_VER = "v10"
+    sig = REFS_CACHE_VER + "|" + p + "|" + str(int(top_k)) + "|" + str(db_mtime) + "|" + llm_flag + "|" + trans_flag
     return hashlib.sha1(sig.encode("utf-8", "ignore")).hexdigest()[:16]
 
 
@@ -2774,8 +2775,9 @@ def _page_chat(settings, chat_store: ChatStore, retriever: BM25Retriever, top_k:
     )
     hits = _group_hits_by_top_heading(hits_raw, top_k=top_k)
     # Respect the library: once we have hits, always do an in-doc deep read to refine context.
+    # IMPORTANT: do not flip st.session_state["deep_read"] here, otherwise the refs cache key can change
+    # between reruns and the panel may look like it "disappeared".
     effective_deep_read = bool(deep_read) or bool(hits)
-    st.session_state["deep_read"] = bool(effective_deep_read)
 
     # Build & render "参考定位" for this prompt with progress feedback.
     # This runs AFTER the prompt is already visible, so the page won't look frozen.
@@ -2791,15 +2793,15 @@ def _page_chat(settings, chat_store: ChatStore, retriever: BM25Retriever, top_k:
                     st.caption("（已将中文问题转换为英文检索关键词后再检索。）")
 
                 with st.spinner("正在定位参考文献（合并同一篇文献 → 深读少量命中 → 语义重排）..."):
-                    grouped_docs = _group_hits_by_doc_for_refs(
-                        hits_raw,
-                        prompt_text=prompt_to_answer,
-                        top_k_docs=top_k,
-                        deep_query=str(used_query or ""),
-                        deep_read=bool(st.session_state.get("deep_read")),
-                        llm_rerank=bool(st.session_state.get("llm_rerank")),
-                        settings=settings,
-                    )
+                        grouped_docs = _group_hits_by_doc_for_refs(
+                            hits_raw,
+                            prompt_text=prompt_to_answer,
+                            top_k_docs=top_k,
+                            deep_query=str(used_query or ""),
+                            deep_read=bool(effective_deep_read),
+                            llm_rerank=bool(st.session_state.get("llm_rerank")),
+                            settings=settings,
+                        )
 
                 cache2[ck2] = {
                     "hits": grouped_docs,
