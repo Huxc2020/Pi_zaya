@@ -475,8 +475,14 @@ def _qa_ensure_started() -> None:
     global _QA_THREAD
     if _QA_THREAD is not None and _QA_THREAD.is_alive():
         return
-    _QA_THREAD = threading.Thread(target=_qa_worker_loop, daemon=True)
-    _QA_THREAD.start()
+    try:
+        _QA_THREAD = threading.Thread(target=_qa_worker_loop, daemon=True)
+        _QA_THREAD.start()
+    except Exception as e:
+        with _QA_LOCK:
+            _QA_STATE["last"] = f"thread_start_fail: {e}"
+            _QA_STATE["running"] = False
+            _QA_STATE["current"] = None
 
 
 def _bg_enqueue(task: dict) -> None:
@@ -3279,6 +3285,13 @@ def _page_chat(
     prompt_to_answer = ""
 
     msgs = st.session_state.get("messages") or []
+    last_role = str((msgs[-1] or {}).get("role") or "") if msgs else ""
+    # Track "awaiting answer" so the UI doesn't look stuck when the background worker finishes quickly.
+    await_sig_state = str(st.session_state.get("await_prompt_sig") or "").strip()
+    try:
+        await_ts_state = float(st.session_state.get("await_prompt_ts") or 0.0)
+    except Exception:
+        await_ts_state = 0.0
     if not msgs:
         st.caption(S["no_msgs"])
     else:
@@ -3304,6 +3317,11 @@ def _page_chat(
                     st.markdown(_normalize_math_markdown(body))
             st.markdown("")
 
+    # Clear awaiting flag once we have an assistant reply.
+    if last_role == "assistant":
+        st.session_state.pop("await_prompt_sig", None)
+        st.session_state.pop("await_prompt_ts", None)
+
     # References should stay above the input box.
     # Always render for the latest user question (even if the last message isn't assistant yet),
     # otherwise Streamlit rerun timing can make it "disappear".
@@ -3312,6 +3330,8 @@ def _page_chat(
         if m.get("role") == "user":
             last_user = (m.get("content") or "").strip()
             break
+    last_user_sig = hashlib.sha1(last_user.encode("utf-8", "ignore")).hexdigest()[:12] if last_user else ""
+    awaiting_recent = bool(last_role == "user" and last_user_sig and (await_sig_state == last_user_sig) and (time.time() - float(await_ts_state or 0.0) < 45.0))
     refs_slot = st.empty()
     refs_key_ns = f"latest_{st.session_state.get('conv_id','')}"
     with refs_slot.container():
@@ -3345,7 +3365,9 @@ def _page_chat(
                         }
                     else:
                         cache2[ck] = {"done": False}
-                if isinstance(cur, dict) and str(cur.get("conv_id") or "") == conv_id and str(cur.get("prompt_sig") or "") == prompt_sig and not bool(cur.get("refs_done")):
+                # Show an always-visible progress hint even when the expander is collapsed.
+                has_task = bool(isinstance(cur, dict) and str(cur.get("conv_id") or "") == conv_id and str(cur.get("prompt_sig") or "") == prompt_sig)
+                if (has_task and (not bool(cur.get("refs_done")))) or awaiting_recent:
                     st.markdown("<div class='refbox'>参考定位：生成中…</div>", unsafe_allow_html=True)
             except Exception:
                 pass
@@ -3362,9 +3384,21 @@ def _page_chat(
     cur = qa.get("current") or None
     q_items = list(qa.get("queue") or [])
     running_this = isinstance(cur, dict) and str(cur.get("conv_id") or "") == conv_id and str(cur.get("status") or "") == "running"
+    has_any_for_conv = False
+    try:
+        if isinstance(cur, dict) and str(cur.get("conv_id") or "") == conv_id:
+            has_any_for_conv = True
+        if not has_any_for_conv:
+            for t in q_items:
+                if isinstance(t, dict) and str(t.get("conv_id") or "") == conv_id:
+                    has_any_for_conv = True
+                    break
+    except Exception:
+        has_any_for_conv = False
+    awaiting = bool(last_role == "user" and last_user_sig and (has_any_for_conv or awaiting_recent))
 
     with gen_details_panel.container():
-        with st.expander("回答队列（可展开）", expanded=running_this or bool(q_items)):
+        with st.expander("回答队列（可展开）", expanded=running_this or bool(q_items) or awaiting):
             if running_this and isinstance(cur, dict):
                 stage = str(cur.get("stage") or "").strip()
                 char_count = int(cur.get("char_count") or 0)
@@ -3390,7 +3424,13 @@ def _page_chat(
                 with c1[1]:
                     st.caption(f"队列中共有 {len(q_items)} 条待回答。")
             else:
-                st.caption("（队列为空）")
+                if awaiting and last_user:
+                    st.caption("已提交问题，后台处理中…")
+                    last_note = str(qa.get("last") or "").strip()
+                    if last_note:
+                        st.caption(f"状态：{last_note}")
+                else:
+                    st.caption("（队列为空）")
 
             if q_items:
                 for i, t in enumerate(q_items, start=1):
@@ -3441,6 +3481,32 @@ def _page_chat(
         root.postMessage({ isStreamlitMessage: true, type: "streamlit:rerunScript" }, "*");
       } catch (e) {}
     }, 800);
+  } catch (e) {}
+})();
+</script>
+            """,
+            height=0,
+        )
+    elif awaiting:
+        # If the worker finishes *very* fast, Streamlit might not rerun and the assistant message won't show.
+        # Keep a short-lived auto refresh so the UI updates.
+        with gen_panel.container():
+            st.markdown("<div class='msg-meta'>AI（处理中）</div>", unsafe_allow_html=True)
+            st.caption("正在检索/阅读知识库…")
+        components.html(
+            """
+<script>
+(function () {
+  try {
+    const root = window.parent;
+    if (!root) return;
+    if (root._kbQaAwaitTimer) return;
+    root._kbQaAwaitTimer = setTimeout(function () {
+      try {
+        root._kbQaAwaitTimer = null;
+        root.postMessage({ isStreamlitMessage: true, type: "streamlit:rerunScript" }, "*");
+      } catch (e) {}
+    }, 650);
   } catch (e) {}
 })();
 </script>
@@ -3516,6 +3582,8 @@ def _page_chat(
         if txt:
             chat_store.append_message(conv_id, "user", txt)
             chat_store.set_title_if_default(conv_id, txt)
+            st.session_state["await_prompt_sig"] = hashlib.sha1(txt.encode("utf-8", "ignore")).hexdigest()[:12]
+            st.session_state["await_prompt_ts"] = time.time()
             _qa_enqueue(
                 {
                     "id": uuid.uuid4().hex[:12],
