@@ -66,3 +66,13 @@ class LibraryStore:
         with self._connect() as conn:
             cur = conn.execute("UPDATE pdf_files SET path = ? WHERE path = ?", (new_s, old_s))
             return int(getattr(cur, "rowcount", 0) or 0)
+
+    def delete_by_path(self, path: Path) -> int:
+        """
+        Best-effort removal when a PDF file is deleted on disk.
+        Returns affected rows count.
+        """
+        path_s = str(Path(path))
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM pdf_files WHERE path = ?", (path_s,))
+            return int(getattr(cur, "rowcount", 0) or 0)

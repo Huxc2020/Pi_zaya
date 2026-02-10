@@ -112,6 +112,29 @@ def _bg_enqueue(task: dict) -> None:
         _BG_STATE["total"] = int(_BG_STATE.get("done", 0)) + len(_BG_STATE["queue"])
 
 
+def _bg_remove_queued_tasks_for_pdf(pdf_path: Path) -> int:
+    """
+    Remove queued (not running) conversion tasks for a given PDF.
+    Returns removed count.
+    """
+    p = str(Path(pdf_path))
+    removed = 0
+    with _BG_LOCK:
+        q = list(_BG_STATE.get("queue") or [])
+        kept = []
+        for t in q:
+            try:
+                if str(t.get("pdf") or "") == p:
+                    removed += 1
+                else:
+                    kept.append(t)
+            except Exception:
+                kept.append(t)
+        _BG_STATE["queue"] = kept
+        _BG_STATE["total"] = int(_BG_STATE.get("done", 0)) + len(_BG_STATE["queue"])
+    return removed
+
+
 def _bg_cancel_all() -> None:
     with _BG_LOCK:
         _BG_STATE["cancel"] = True
@@ -3434,7 +3457,7 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
                         else:
                             st.markdown("<span class='pill warn'>\u672a\u8f6c\u6362</span>", unsafe_allow_html=True)
 
-                    c_top = st.columns([1.1, 1.1, 0.9, 1.2, 2.7])
+                    c_top = st.columns([1.05, 1.05, 0.9, 1.2, 1.0, 2.4])
                     with c_top[0]:
                         if st.button("\u6253\u5f00 PDF", key=f"{key_ns}_open_pdf_{uid}"):
                             try:
@@ -3481,6 +3504,69 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
                                 st.experimental_rerun()
 
                     with c_top[4]:
+                        # Delete PDF (and optionally its generated MD folder).
+                        del_key = f"{key_ns}_del_state_{uid}"
+                        if del_key not in st.session_state:
+                            st.session_state[del_key] = False
+
+                        if running_this:
+                            st.button("\u5220\u9664", key=f"{key_ns}_del_btn_{uid}", disabled=True)
+                            st.caption("\u8f6c\u6362\u4e2d\u65e0\u6cd5\u5220\u9664")
+                        else:
+                            if not bool(st.session_state.get(del_key)):
+                                if st.button("\u5220\u9664", key=f"{key_ns}_del_btn_{uid}", help="\u5220\u9664 PDF \u6587\u4ef6\uff08\u4e0d\u53ef\u6062\u590d\uff09"):
+                                    st.session_state[del_key] = True
+                                    st.experimental_rerun()
+                            else:
+                                st.warning("\u786e\u8ba4\u5220\u9664\u8fd9\u4e2a PDF\uff1f\u6b64\u64cd\u4f5c\u4e0d\u53ef\u6062\u590d\u3002")
+                                also_md = st.checkbox("\u540c\u65f6\u5220\u9664\u5bf9\u5e94 MD \u6587\u4ef6\u5939", value=True, key=f"{key_ns}_del_also_md_{uid}")
+                                c_del = st.columns([1.1, 1.1])
+                                with c_del[0]:
+                                    if st.button("\u786e\u8ba4\u5220\u9664", key=f"{key_ns}_del_confirm_{uid}"):
+                                        # Remove queued tasks first (if any)
+                                        if queued_pos is not None:
+                                            _bg_remove_queued_tasks_for_pdf(pdf)
+
+                                        # Delete PDF on disk
+                                        ok_pdf = False
+                                        try:
+                                            pdf.unlink()
+                                            ok_pdf = True
+                                        except Exception:
+                                            ok_pdf = False
+
+                                        # Delete MD folder if requested
+                                        ok_md = True
+                                        if also_md:
+                                            try:
+                                                md_root = Path(md_out_root).resolve()
+                                                target = (Path(md_out_root) / pdf.stem).resolve()
+                                                if str(target).lower().startswith(str(md_root).lower()) and target.exists():
+                                                    shutil.rmtree(target, ignore_errors=True)
+                                            except Exception:
+                                                ok_md = False
+
+                                        # Best-effort remove from library index
+                                        try:
+                                            lib_store.delete_by_path(pdf)
+                                        except Exception:
+                                            pass
+
+                                        st.session_state[del_key] = False
+                                        if ok_pdf:
+                                            st.success("\u5df2\u5220\u9664 PDF\u3002")
+                                        else:
+                                            st.warning("\u5220\u9664 PDF \u5931\u8d25\uff08\u53ef\u80fd\u88ab\u5360\u7528\uff09\u3002")
+                                        if also_md and (not ok_md):
+                                            st.warning("\u5220\u9664 MD \u6587\u4ef6\u5939\u5931\u8d25\u3002")
+                                        st.info("\u5982\u679c\u4f60\u5df2\u7ecf\u5efa\u5e93\uff0c\u5220\u9664\u540e\u5efa\u8bae\u70b9\u4e00\u6b21\u300c\u66f4\u65b0\u77e5\u8bc6\u5e93\u300d\u4ee5\u6e05\u7406\u65e7\u7d22\u5f15\u3002")
+                                        st.experimental_rerun()
+                                with c_del[1]:
+                                    if st.button("\u53d6\u6d88", key=f"{key_ns}_del_cancel_{uid}"):
+                                        st.session_state[del_key] = False
+                                        st.experimental_rerun()
+
+                    with c_top[5]:
                         md_name = md_main.name if md_exists else "\u2014"
                         st.markdown(
                             f"""<div class='meta-kv'>
