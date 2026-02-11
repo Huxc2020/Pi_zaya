@@ -24,16 +24,36 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from kb.chat_store import ChatStore
+from kb.bg_queue_state import (
+    begin_next_task_or_idle as bg_begin_next_task_or_idle,
+    cancel_all as bg_cancel_all,
+    enqueue as bg_enqueue,
+    finish_task as bg_finish_task,
+    is_running_snapshot as bg_is_running_snapshot,
+    remove_queued_tasks_for_pdf as bg_remove_queued_tasks_for_pdf,
+    should_cancel as bg_should_cancel,
+    snapshot as bg_snapshot,
+    update_page_progress as bg_update_page_progress,
+)
 from kb.chunking import chunk_markdown
 from kb.config import load_settings
 from kb.library_store import LibraryStore
 from kb.llm import DeepSeekChat
 from kb import runtime_state as RUNTIME
-from kb.pdf_tools import PDF_META_EXTRACT_VERSION, PdfMetaSuggestion, build_base_name, ensure_dir, extract_pdf_meta_suggestion, open_in_explorer, run_pdf_to_md
+from kb.pdf_tools import PdfMetaSuggestion, build_base_name, ensure_dir, extract_pdf_meta_suggestion, open_in_explorer, run_pdf_to_md
 from kb.prefs import load_prefs, save_prefs
+from kb.rename_manager import ensure_state_defaults as ensure_rename_manager_state
+from kb.rename_manager import render_panel as render_rename_manager_panel
+from kb.rename_manager import render_prompt as render_rename_prompt
 from kb.retriever import BM25Retriever
 from kb.store import load_all_chunks
 from kb.tokenize import tokenize
+
+# Force converter script to this workspace copy, avoiding accidental fallback
+# to an older sibling-repo script when multiple app processes are running.
+_LOCAL_CONVERTER = Path(__file__).resolve().parent / "test2.py"
+if _LOCAL_CONVERTER.exists():
+    os.environ["KB_PDF_CONVERTER"] = str(_LOCAL_CONVERTER)
 
 # Backward-compat for old runtime_state modules in long-lived Streamlit processes.
 if not hasattr(RUNTIME, "GEN_LOCK"):
@@ -511,9 +531,11 @@ def _gen_start_task(task: dict) -> bool:
 
 
 def _bg_enqueue(task: dict) -> None:
-    with _BG_LOCK:
-        _BG_STATE["queue"].append(task)
-        _BG_STATE["total"] = int(_BG_STATE.get("done", 0)) + len(_BG_STATE["queue"])
+    if "_tid" not in task:
+        task = dict(task)
+        task["_tid"] = uuid.uuid4().hex
+    bg_enqueue(_BG_STATE, _BG_LOCK, task)
+    _bg_ensure_started()
 
 
 def _bg_remove_queued_tasks_for_pdf(pdf_path: Path) -> int:
@@ -521,64 +543,20 @@ def _bg_remove_queued_tasks_for_pdf(pdf_path: Path) -> int:
     Remove queued (not running) conversion tasks for a given PDF.
     Returns removed count.
     """
-    p = str(Path(pdf_path))
-    removed = 0
-    with _BG_LOCK:
-        q = list(_BG_STATE.get("queue") or [])
-        kept = []
-        for t in q:
-            try:
-                if str(t.get("pdf") or "") == p:
-                    removed += 1
-                else:
-                    kept.append(t)
-            except Exception:
-                kept.append(t)
-        _BG_STATE["queue"] = kept
-        _BG_STATE["total"] = int(_BG_STATE.get("done", 0)) + len(_BG_STATE["queue"])
-    return removed
+    return bg_remove_queued_tasks_for_pdf(_BG_STATE, _BG_LOCK, pdf_path)
 
 
 def _bg_cancel_all() -> None:
-    with _BG_LOCK:
-        _BG_STATE["cancel"] = True
-        _BG_STATE["cur_page_msg"] = "正在停止当前转换…"
+    bg_cancel_all(_BG_STATE, _BG_LOCK, "正在停止当前转换…")
 
 
 def _bg_snapshot() -> dict:
-    with _BG_LOCK:
-        snap = dict(_BG_STATE)
-        try:
-            snap["queue"] = list(_BG_STATE.get("queue") or [])
-        except Exception:
-            snap["queue"] = []
-        return snap
+    return bg_snapshot(_BG_STATE, _BG_LOCK)
 
 
 def _bg_worker_loop() -> None:
     while True:
-        task = None
-        with _BG_LOCK:
-            if _BG_STATE.get("cancel"):
-                _BG_STATE["queue"].clear()
-                _BG_STATE["running"] = False
-                _BG_STATE["current"] = ""
-                _BG_STATE["cancel"] = False
-                _BG_STATE["total"] = int(_BG_STATE.get("done", 0))
-
-            if _BG_STATE["queue"]:
-                task = _BG_STATE["queue"].pop(0)
-                _BG_STATE["running"] = True
-                _BG_STATE["current"] = str(task.get("name") or "")
-                _BG_STATE["cur_page_done"] = 0
-                _BG_STATE["cur_page_total"] = 0
-                _BG_STATE["cur_page_msg"] = ""
-            else:
-                _BG_STATE["running"] = False
-                _BG_STATE["current"] = ""
-                _BG_STATE["cur_page_done"] = 0
-                _BG_STATE["cur_page_total"] = 0
-                _BG_STATE["cur_page_msg"] = ""
+        task = bg_begin_next_task_or_idle(_BG_STATE, _BG_LOCK)
 
         if task is None:
             time.sleep(0.35)
@@ -590,6 +568,7 @@ def _bg_worker_loop() -> None:
         no_llm = bool(task.get("no_llm", False))
         eq_image_fallback = bool(task.get("eq_image_fallback", True))
         replace = bool(task.get("replace", False))
+        task_id = str(task.get("_tid") or "")
 
         try:
             md_folder = out_root / pdf.stem
@@ -606,17 +585,13 @@ def _bg_worker_loop() -> None:
                     pass
 
             def _on_progress(page_done: int, page_total: int, msg: str = "") -> None:
-                with _BG_LOCK:
-                    try:
-                        _BG_STATE["cur_page_done"] = int(page_done or 0)
-                        _BG_STATE["cur_page_total"] = int(page_total or 0)
-                        _BG_STATE["cur_page_msg"] = str(msg or "")[:220]
-                    except Exception:
-                        pass
+                try:
+                    bg_update_page_progress(_BG_STATE, _BG_LOCK, page_done, page_total, msg, task_id=task_id)
+                except Exception:
+                    pass
 
             def _should_cancel() -> bool:
-                with _BG_LOCK:
-                    return bool(_BG_STATE.get("cancel"))
+                return bg_should_cancel(_BG_STATE, _BG_LOCK)
 
             ok, out_folder = run_pdf_to_md(
                 pdf_path=pdf,
@@ -637,12 +612,8 @@ def _bg_worker_loop() -> None:
             if ok and db_dir:
                 try:
                     ingest_py = Path(__file__).resolve().parent / "ingest.py"
-                    md_main = md_folder / f"{pdf.stem}.en.md"
-                    if not md_main.exists() and md_folder.exists():
-                        any_md = next(iter(sorted(md_folder.glob("*.md"))), None)
-                        if any_md:
-                            md_main = any_md
-                    if ingest_py.exists() and md_main.exists():
+                    _, md_main, md_exists = _resolve_md_output_paths(out_root, pdf)
+                    if ingest_py.exists() and md_exists:
                         subprocess.run(
                             [os.sys.executable, str(ingest_py), "--src", str(md_main), "--db", str(db_dir), "--incremental"],
                             check=False,
@@ -656,19 +627,83 @@ def _bg_worker_loop() -> None:
         except Exception as e:
             msg = f"FAIL: {e}"
 
-        with _BG_LOCK:
-            _BG_STATE["done"] = int(_BG_STATE.get("done", 0)) + 1
-            _BG_STATE["total"] = int(_BG_STATE.get("done", 0)) + len(_BG_STATE["queue"])
-            _BG_STATE["last"] = msg
+        bg_finish_task(_BG_STATE, _BG_LOCK, msg, task_id=task_id)
 
 
 def _bg_ensure_started() -> None:
+    worker_ver = "2026-02-12.bg.v3"
     t = getattr(RUNTIME, "BG_THREAD", None)
+    running_ver = str(getattr(RUNTIME, "BG_WORKER_VERSION", "") or "")
     if t is not None and t.is_alive():
-        return
+        if running_ver == worker_ver:
+            return
+        # Streamlit reruns can keep an old daemon thread alive.
+        # Ask the old worker to cancel, then start a fresh one with new code.
+        _bg_cancel_all()
+        deadline = time.time() + 8.0
+        while t.is_alive() and time.time() < deadline:
+            time.sleep(0.2)
     t = threading.Thread(target=_bg_worker_loop, daemon=True)
     RUNTIME.BG_THREAD = t
+    RUNTIME.BG_WORKER_VERSION = worker_ver
     t.start()
+
+
+def _build_bg_task(
+    *,
+    pdf_path: Path,
+    out_root: Path,
+    db_dir: Path,
+    no_llm: bool,
+    replace: bool = False,
+) -> dict:
+    pdf = Path(pdf_path)
+    return {
+        "_tid": uuid.uuid4().hex,
+        "pdf": str(pdf),
+        "out_root": str(out_root),
+        "db_dir": str(db_dir),
+        "no_llm": bool(no_llm),
+        "eq_image_fallback": True,
+        "replace": bool(replace),
+        "name": pdf.name,
+    }
+
+
+def _resolve_md_output_paths(out_root: Path, pdf_path: Path) -> tuple[Path, Path, bool]:
+    pdf = Path(pdf_path)
+    md_folder = Path(out_root) / pdf.stem
+    md_main = md_folder / f"{pdf.stem}.en.md"
+    md_exists = md_main.exists()
+    if (not md_exists) and md_folder.exists():
+        try:
+            any_md = next(iter(sorted(md_folder.glob("*.md"))), None)
+            if any_md:
+                md_main = any_md
+                md_exists = True
+        except Exception:
+            pass
+    return md_folder, md_main, md_exists
+
+
+def _next_pdf_dest_path(pdf_dir: Path, base_name: str, *, max_suffix: int = 100) -> Path:
+    dest_pdf = Path(pdf_dir) / f"{base_name}.pdf"
+    if not dest_pdf.exists():
+        return dest_pdf
+    k = 2
+    while (Path(pdf_dir) / f"{base_name}-{k}.pdf").exists() and k < int(max_suffix):
+        k += 1
+    return Path(pdf_dir) / f"{base_name}-{k}.pdf"
+
+
+def _persist_upload_pdf(tmp_path: Path, dest_pdf: Path, data: bytes) -> None:
+    try:
+        if tmp_path.exists() and tmp_path.resolve() != dest_pdf.resolve():
+            tmp_path.replace(dest_pdf)
+            return
+    except Exception:
+        pass
+    dest_pdf.write_bytes(data)
 
 
 def _init_theme_css(theme_mode: str = "dark") -> None:
@@ -842,6 +877,20 @@ div[data-testid="stStatusWidget"] *{
 }
 [data-stale="true"]{
   opacity: 1 !important;
+  visibility: visible !important;
+  pointer-events: none !important;
+  filter: none !important;
+  transition: none !important;
+}
+body.kb-live-streaming [data-testid="stAppViewContainer"],
+body.kb-live-streaming [data-testid="stAppViewContainer"]{
+  opacity: 1 !important;
+  filter: none !important;
+}
+body.kb-live-streaming [data-stale="true"]{
+  opacity: 1 !important;
+  visibility: visible !important;
+  pointer-events: none !important;
   filter: none !important;
   transition: none !important;
 }
@@ -855,6 +904,8 @@ body.kb-resizing [data-testid="stAppViewContainer"] *{
 }
 body.kb-resizing [data-stale="true"]{
   opacity: 1 !important;
+  visibility: visible !important;
+  pointer-events: none !important;
   filter: none !important;
   transition: none !important;
 }
@@ -4548,7 +4599,6 @@ def _render_refs(
                     # Keep the expander open after rerun, otherwise it looks like refs "disappeared".
                     st.session_state[more_key] = True
                     st.session_state[open_key] = True
-                    st.experimental_rerun()
             with c_more[1]:
                 st.caption(f"共 {len(hits)} 条")
 
@@ -4848,38 +4898,6 @@ def _cleanup_tmp_uploads(pdf_dir: Path) -> int:
     return n
 
 
-def _sanitize_filename_component(s: str) -> str:
-    s = (s or "").strip()
-    s = re.sub(r"\s+", " ", s)
-    s = re.sub(r'[<>:"/\\\\|?*]+', "-", s)
-    s = s.replace("\u0000", "").strip()
-    s = s.strip(" .-_")
-    return s
-
-
-def _is_normalized_pdf_stem(stem: str) -> bool:
-    """
-    Heuristic: venue-year-title (at least has a 4-digit year between dashes).
-    """
-    t = (stem or "").strip()
-    if not t:
-        return False
-    if len(t) < 12:
-        return False
-    return bool(re.search(r"-.?(19\d{2}|20\d{2}).?-", t))
-
-
-def _unique_pdf_path(pdf_dir: Path, base: str) -> Path:
-    base = _sanitize_filename_component(base) or "paper"
-    dest = Path(pdf_dir) / f"{base}.pdf"
-    if not dest.exists():
-        return dest
-    k = 2
-    while (Path(pdf_dir) / f"{base}-{k}.pdf").exists() and k < 999:
-        k += 1
-    return Path(pdf_dir) / f"{base}-{k}.pdf"
-
-
 def _list_pdf_paths_fast(pdf_dir: Path) -> list[Path]:
     """
     Fast non-recursive PDF listing.
@@ -4905,39 +4923,6 @@ def _list_pdf_paths_fast(pdf_dir: Path) -> list[Path]:
         except Exception:
             out = []
     return out
-
-
-def _select_recent_pdf_paths(pdf_dir: Path, n: int) -> list[Path]:
-    """
-    Select N most-recently modified PDFs (non-recursive).
-    This still needs to read mtimes, so keep it off the hot path; call only on explicit user actions.
-    """
-    import heapq
-
-    n = int(n or 0)
-    if n <= 0:
-        return []
-
-    heap: list[tuple[float, str]] = []
-    try:
-        with os.scandir(Path(pdf_dir)) as it:
-            for e in it:
-                try:
-                    if not e.is_file():
-                        continue
-                    if not e.name.lower().endswith(".pdf"):
-                        continue
-                    mt = float(e.stat().st_mtime)
-                    heapq.heappush(heap, (mt, e.path))
-                    if len(heap) > n:
-                        heapq.heappop(heap)
-                except Exception:
-                    continue
-    except Exception:
-        return []
-
-    heap.sort(reverse=True)
-    return [Path(p) for _, p in heap]
 
 
 def _page_chat(
@@ -4974,6 +4959,7 @@ def _page_chat(
         and str(cur_task.get("status") or "") == "running"
         and str(cur_task.get("conv_id") or "") == conv_id
     )
+    _set_live_streaming_mode(running_for_conv)
 
     st.session_state["pending_prompt"] = ""
 
@@ -5166,6 +5152,7 @@ def _page_chat(
     onPointerUp: null,
     onPointerCancel: null,
     onTouchEnd: null,
+    onKeyDown: null,
     onBlur: null,
     onResize: null,
   };
@@ -5193,15 +5180,50 @@ def _page_chat(
   function findSidebar() {
     return pickFresh(root.querySelectorAll('section[data-testid="stSidebar"]'));
   }
+  function _btnText(btn) {
+    return String((btn && (btn.innerText || btn.textContent)) || "").trim().toLowerCase();
+  }
+  function isStopBtnText(t) {
+    const s = String(t || "").trim().toLowerCase();
+    return s === "■" || s === "停止" || s === "stop";
+  }
   function isSendBtnText(t) {
-    const s = String(t || "").trim();
-    return s === "发送" || s === "↑" || s === "■" || s.toLowerCase() === "send";
+    const s = String(t || "").trim().toLowerCase();
+    return s === "发送" || s === "↑" || s === "send" || s === "submit";
   }
   function hasSendButton(form) {
     if (!form) return false;
     const btns = form.querySelectorAll('button');
     for (const b of btns) {
-      if (isSendBtnText(b.innerText || b.textContent || "")) return true;
+      if (isInsideStaleNode(b)) continue;
+      const txt = _btnText(b);
+      if (isStopBtnText(txt)) continue;
+      if (isSendBtnText(txt)) return true;
+    }
+    return false;
+  }
+  function clickSendButton(form) {
+    if (!form) return false;
+    const btns = Array.from(form.querySelectorAll("button"));
+    let fallback = null;
+    for (const b of btns) {
+      if (!b || isInsideStaleNode(b) || b.disabled) continue;
+      const txt = _btnText(b);
+      if (isStopBtnText(txt)) continue;
+      if (isSendBtnText(txt)) {
+        b.click();
+        return true;
+      }
+      if (!fallback) {
+        const typ = String(b.getAttribute("type") || "").toLowerCase();
+        if (typ === "submit" || b.closest('div[data-testid="stFormSubmitButton"]')) {
+          fallback = b;
+        }
+      }
+    }
+    if (fallback) {
+      fallback.click();
+      return true;
     }
     return false;
   }
@@ -5268,14 +5290,11 @@ def _page_chat(
     ta.addEventListener("keydown", function (e) {
       const isCtrlEnter = (e.ctrlKey || e.metaKey) && e.key === "Enter";
       if (!isCtrlEnter) return;
+      if (e.isComposing) return;
+      const ok = clickSendButton(form || root);
+      if (!ok) return;
       e.preventDefault();
-      const btns = (form || root).querySelectorAll("button");
-      for (const b of btns) {
-        if ((b.innerText || b.textContent || "").trim() === "↑") {
-          b.click();
-          break;
-        }
-      }
+      e.stopPropagation();
     }, { capture: true });
   }
   function hook() {
@@ -5330,6 +5349,23 @@ def _page_chat(
     state.onPointerUp = stopDrag;
     state.onPointerCancel = stopDrag;
     state.onTouchEnd = stopDrag;
+    state.onKeyDown = function (e) {
+      try {
+        const isCtrlEnter = (e.ctrlKey || e.metaKey) && e.key === "Enter";
+        if (!isCtrlEnter || e.isComposing) return;
+        const target = e.target;
+        if (!target || isInsideStaleNode(target)) return;
+        const ta = (target.tagName === "TEXTAREA") ? target : (target.closest ? target.closest("textarea") : null);
+        if (!ta) return;
+        const hit = findPromptFormAndTextarea();
+        if (!hit.form || !hit.ta) return;
+        if (ta !== hit.ta && !hit.form.contains(ta)) return;
+        const ok = clickSendButton(hit.form);
+        if (!ok) return;
+        e.preventDefault();
+        e.stopPropagation();
+      } catch (err) {}
+    };
     state.onBlur = stopDrag;
     state.onResize = scheduleHook;
 
@@ -5342,6 +5378,7 @@ def _page_chat(
     root.addEventListener("pointerup", state.onPointerUp, true);
     root.addEventListener("pointercancel", state.onPointerCancel, true);
     root.addEventListener("touchend", state.onTouchEnd, true);
+    root.addEventListener("keydown", state.onKeyDown, true);
     host.addEventListener("blur", state.onBlur, true);
     host.addEventListener("resize", state.onResize, { passive: true });
   }
@@ -5376,6 +5413,7 @@ def _page_chat(
     try { root.removeEventListener("pointerup", state.onPointerUp, true); } catch (e) {}
     try { root.removeEventListener("pointercancel", state.onPointerCancel, true); } catch (e) {}
     try { root.removeEventListener("touchend", state.onTouchEnd, true); } catch (e) {}
+    try { root.removeEventListener("keydown", state.onKeyDown, true); } catch (e) {}
     try { host.removeEventListener("blur", state.onBlur, true); } catch (e) {}
     try { host.removeEventListener("resize", state.onResize, false); } catch (e) {}
     setResizing(false);
@@ -5476,7 +5514,6 @@ def _page_chat(
 
 def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: Path, prefs: dict, retriever_reload_flag: dict) -> None:
     _bg_ensure_started()
-    bg_auto_rerun_issued = False
 
     retriever_err = str(st.session_state.get("retriever_load_error") or "").strip()
     if retriever_err:
@@ -5585,48 +5622,18 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
     # Background status: keep it non-blocking and compact here.
     # Detailed progress bar is rendered under the conversion section ("已有文献") for better UX when scrolling.
     bg = _bg_snapshot()
-    if bg.get("running") or (bg.get("total", 0) and bg.get("done", 0) < bg.get("total", 0)):
+    if bg_is_running_snapshot(bg):
         st.markdown(
             "<div class='refbox'>\u540e\u53f0\u8f6c\u6362\u4efb\u52a1\u8fd0\u884c\u4e2d\uff1a\u8bf7\u5728\u4e0b\u65b9\u201c\u5df2\u6709\u6587\u732e\u201d\u533a\u57df\u67e5\u770b\u8fdb\u5ea6\u6761\u3002</div>",
             unsafe_allow_html=True,
         )
 
-    # Prompt once when user selects a directory that likely needs naming cleanup.
     try:
         dir_sig = str(Path(pdf_dir).expanduser().resolve())
     except Exception:
         dir_sig = str(pdf_dir)
     dismissed = st.session_state.setdefault("rename_prompt_dismissed_dirs", set())
-    if isinstance(dismissed, set) and (dir_sig not in dismissed) and pdfs:
-        # Show prompt only when we see at least a few "non-normalized" names.
-        non_norm = 0
-        for p in pdfs[:40]:
-            if p.name.lower().startswith("__upload__"):
-                continue
-            if not _is_normalized_pdf_stem(p.stem):
-                non_norm += 1
-            if non_norm >= 3:
-                break
-        if non_norm >= 3:
-            st.markdown(
-                "<div class='kb-notice'>检测到你设置了新的 PDF 目录：其中有些文件名可能不是「期刊-年份-标题」。要不要我根据 PDF 内容识别信息并给出重命名建议？</div>",
-                unsafe_allow_html=True,
-            )
-            c_p = st.columns([1.1, 1.0, 10])
-            with c_p[0]:
-                if st.button("查看建议", key="rename_prompt_open"):
-                    st.session_state["rename_mgr_open"] = True
-                    st.session_state["rename_scan_trigger"] = False
-                    st.session_state["rename_scan_scope"] = "最近 30 个"
-                    st.session_state["rename_scan_use_llm"] = False
-                    st.experimental_rerun()
-            with c_p[1]:
-                if st.button("以后再说", key="rename_prompt_dismiss"):
-                    try:
-                        dismissed.add(dir_sig)
-                    except Exception:
-                        pass
-                    st.experimental_rerun()
+    render_rename_prompt(pdfs=pdfs, dir_sig=dir_sig, dismissed_dirs=dismissed)
 
     st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
     cols = st.columns([1, 1, 1, 1])
@@ -5651,294 +5658,17 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
         if st.button("文件名管理", key="rename_mgr_btn", help="根据 PDF 内容识别「期刊-年份-标题」并建议重命名"):
             st.session_state["rename_mgr_open"] = True
             st.session_state["rename_scan_trigger"] = False
-            st.experimental_rerun()
 
-    # "Small window" rename manager (modal-like overlay).
-    if "rename_mgr_open" not in st.session_state:
-        st.session_state["rename_mgr_open"] = False
-    if "rename_scan_trigger" not in st.session_state:
-        st.session_state["rename_scan_trigger"] = False
-    if "rename_scan_scope" not in st.session_state:
-        st.session_state["rename_scan_scope"] = "最近 30 个"
-    if "rename_scan_use_llm" not in st.session_state:
-        st.session_state["rename_scan_use_llm"] = False
-
-    if bool(st.session_state.get("rename_mgr_open")):
-        # If meta extraction heuristics changed, invalidate any cached suggestions/results in this session.
-        expected_ver = str(PDF_META_EXTRACT_VERSION)
-        if str(st.session_state.get("rename_mgr_cache_ver") or "") != expected_ver:
-            st.session_state["rename_mgr_cache_ver"] = expected_ver
-            st.session_state.pop("rename_pdf_meta_cache", None)
-            st.session_state.pop("rename_scan_results_cache", None)
-
-        # NOTE: Streamlit markdown cannot truly "wrap" widgets into an HTML modal.
-        # A fixed overlay can block clicks and make users feel "stuck".
-        # Use an in-page expander panel instead (fast, reliable, closable).
-        with st.expander("PDF 文件名管理（期刊-年份-标题）", expanded=True):
-            c_top = st.columns([1.0, 1.8, 1.6, 1.6, 6.0])
-            with c_top[0]:
-                if st.button("关闭", key="rename_mgr_close"):
-                    st.session_state["rename_mgr_open"] = False
-                    st.session_state["rename_scan_trigger"] = False
-                    st.experimental_rerun()
-            with c_top[1]:
-                _scope_opts = ["最近 30 个", "最近 50 个", "最近 100 个", "全部"]
-                _cur_scope = str(st.session_state.get("rename_scan_scope") or "最近 30 个")
-                _scope_idx = _scope_opts.index(_cur_scope) if _cur_scope in _scope_opts else 0
-                scope = st.selectbox(
-                    "扫描范围",
-                    options=_scope_opts,
-                    index=_scope_idx,
-                    key="rename_scan_scope",
-                )
-            with c_top[2]:
-                st.checkbox("只显示需改名", value=True, key="rename_only_diff")
-            with c_top[3]:
-                st.checkbox("同时改名 MD", value=False, key="rename_also_md", help="如果已生成 Markdown，会把对应文件夹/主 md 尝试一起改名")
-
-            use_llm = bool(st.session_state.get("rename_scan_use_llm"))
-            with c_top[4]:
-                st.checkbox("识别用 LLM（更准）", value=use_llm, key="rename_scan_use_llm", help="只在关键信息缺失时少量调用 LLM 补全（更准但更慢）")
-
-            # Scan button
-            c_scan = st.columns([1.2, 8.8])
-            with c_scan[0]:
-                clicked_scan = st.button("开始识别/刷新", key="rename_scan_btn")
-            with c_scan[1]:
-                st.markdown(
-                    "<div class='refbox'>我会读取 PDF 内容（不是看文件名）来识别「期刊/会议、年份、标题」，然后给出建议文件名。你可以手动编辑后再应用。</div>",
-                    unsafe_allow_html=True,
-                )
-
-        # Cache key for scan results (include extractor version to avoid stale meta after upgrades).
-        scope_s = str(scope or "")
-        llm_flag = "llm1" if bool(st.session_state.get("rename_scan_use_llm")) else "llm0"
-        scan_key = hashlib.sha1((dir_sig + "|" + scope_s + "|" + llm_flag + "|ver:" + expected_ver).encode("utf-8", "ignore")).hexdigest()[:16]
-        results_cache = st.session_state.setdefault("rename_scan_results_cache", {})
-        results = results_cache.get(scan_key)
-
-        # IMPORTANT: only scan when the user explicitly clicks the button.
-        # Auto-scanning can block the UI and make the panel feel "stuck".
-        trigger = bool(clicked_scan)
-        if trigger:
-            meta_cache = st.session_state.setdefault("rename_pdf_meta_cache", {})
-            out_rows: list[dict] = []
-            # Only build the scan list when the user explicitly requests a scan.
-            if scope_s.startswith("最近"):
-                try:
-                    n_scope = int(re.sub(r"\D+", "", scope_s) or "50")
-                except Exception:
-                    n_scope = 50
-                scan_pdfs = _select_recent_pdf_paths(pdf_dir, max(1, n_scope))
-            else:
-                scan_pdfs = list(pdfs)
-
-            total = len(scan_pdfs)
-            prog = st.progress(0.0) if total > 0 else None
-            llm_budget = 8
-            llm_used = 0
-            with st.spinner(f"正在识别 PDF 信息（{total} 个）..."):
-                for i, pdf in enumerate(scan_pdfs, start=1):
-                    if pdf.name.lower().startswith("__upload__"):
-                        continue
-                    try:
-                        st_m = float(pdf.stat().st_mtime)
-                        st_s = int(pdf.stat().st_size)
-                    except Exception:
-                        st_m, st_s = 0.0, 0
-                    cache_k = hashlib.sha1(
-                        (str(pdf) + "|" + str(st_m) + "|" + str(st_s) + "|" + llm_flag + "|ver:" + expected_ver).encode("utf-8", "ignore")
-                    ).hexdigest()[:16]
-                    sugg = meta_cache.get(cache_k)
-                    if not isinstance(sugg, PdfMetaSuggestion):
-                        try:
-                            # Fast pass first (heuristics only).
-                            sugg = extract_pdf_meta_suggestion(pdf, settings=None)
-                            # Optional refinement with a small budget to avoid UI "freezing".
-                            if bool(st.session_state.get("rename_scan_use_llm")) and settings:
-                                needs = (not (sugg.title or "").strip()) or (not (sugg.year or "").strip()) or (not (sugg.venue or "").strip())
-                                if needs and llm_used < llm_budget:
-                                    sugg2 = extract_pdf_meta_suggestion(pdf, settings=settings)
-                                    if sugg2:
-                                        sugg = sugg2
-                                    llm_used += 1
-                        except Exception:
-                            sugg = PdfMetaSuggestion()
-                        meta_cache[cache_k] = sugg
-                    base = build_base_name(venue=sugg.venue, year=sugg.year, title=sugg.title)
-                    base = (base or "").strip()
-                    diff = bool(base) and (base != pdf.stem)
-                    out_rows.append(
-                        {
-                            "path": str(pdf),
-                            "old": pdf.name,
-                            "old_stem": pdf.stem,
-                            "suggest": base,
-                            "diff": diff,
-                            "meta": {"venue": sugg.venue, "year": sugg.year, "title": sugg.title},
-                        }
-                    )
-                    if prog is not None:
-                        prog.progress(min(1.0, i / max(1, total)))
-            if prog is not None:
-                prog.empty()
-            results_cache[scan_key] = out_rows
-            results = out_rows
-        elif results is None:
-            st.caption("点击「开始识别/刷新」后才会读取 PDF 进行识别（避免打开窗口就卡住）。")
-
-        # Render results
-        rows = list(results or [])
-        only_diff = bool(st.session_state.get("rename_only_diff"))
-        if only_diff:
-            rows = [r for r in rows if bool(r.get("diff"))]
-
-        if not rows:
-            st.caption("（没有需要改名的文件，或识别不到可用信息）")
-        else:
-            st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
-            st.caption(f"共 {len(rows)} 条建议（只会在你点击“应用重命名”后真正改名）")
-
-            # Bulk select
-            c_bulk = st.columns([1.4, 1.4, 7.2])
-            with c_bulk[0]:
-                if st.button("全选", key="rename_sel_all"):
-                    for r in rows:
-                        uid = hashlib.md5(str(r.get("path") or "").encode("utf-8", "ignore")).hexdigest()[:10]
-                        st.session_state[f"rename_sel_{uid}"] = True
-                    st.experimental_rerun()
-            with c_bulk[1]:
-                if st.button("全不选", key="rename_sel_none"):
-                    for r in rows:
-                        uid = hashlib.md5(str(r.get("path") or "").encode("utf-8", "ignore")).hexdigest()[:10]
-                        st.session_state[f"rename_sel_{uid}"] = False
-                    st.experimental_rerun()
-            with c_bulk[2]:
-                st.caption("建议格式：期刊-年份-标题（可编辑）")
-
-            for r in rows[:400]:
-                p = str(r.get("path") or "")
-                uid = hashlib.md5(p.encode("utf-8", "ignore")).hexdigest()[:10]
-                old = str(r.get("old") or "")
-                suggest = str(r.get("suggest") or "")
-                meta = r.get("meta") or {}
-                venue = str((meta or {}).get("venue") or "")
-                year = str((meta or {}).get("year") or "")
-                title = str((meta or {}).get("title") or "")
-
-                st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
-                c_row = st.columns([0.9, 4.9, 5.6, 1.6])
-                with c_row[0]:
-                    st.checkbox("选择", value=bool(st.session_state.get(f"rename_sel_{uid}", False)), key=f"rename_sel_{uid}")
-                with c_row[1]:
-                    st.markdown(f"<div class='meta-kv'><b>当前</b>：{html.escape(old)}</div>", unsafe_allow_html=True)
-                    meta_line = " | ".join([x for x in [venue, year, title[:80] + ("…" if len(title) > 80 else "")] if x])
-                    if meta_line:
-                        st.caption(f"识别：{meta_line}")
-                with c_row[3]:
-                    pdf_path = Path(p)
-                    if st.button("打开", key=f"rename_open_{uid}", help="打开 PDF 查看"):
-                        try:
-                            os.startfile(str(pdf_path))  # type: ignore[attr-defined]
-                        except Exception:
-                            try:
-                                open_in_explorer(pdf_path)
-                            except Exception as e:
-                                st.warning(f"打开失败：{e}")
-                    if st.button("定位", key=f"rename_loc_{uid}", help="在资源管理器中定位"):
-                        try:
-                            open_in_explorer(pdf_path)
-                        except Exception as e:
-                            st.warning(f"定位失败：{e}")
-                with c_row[2]:
-                    if not suggest:
-                        st.caption("（识别不到可用信息，跳过）")
-                    else:
-                        st.text_input("建议新文件名（不含 .pdf）", value=suggest, key=f"rename_new_{uid}")
-
-            # Apply rename
-            st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
-            c_apply = st.columns([1.8, 8.2])
-            with c_apply[0]:
-                if st.button("应用重命名", key="rename_apply_btn"):
-                    ops = []
-                    also_md = bool(st.session_state.get("rename_also_md"))
-                    for r in rows:
-                        p = str(r.get("path") or "")
-                        uid = hashlib.md5(p.encode("utf-8", "ignore")).hexdigest()[:10]
-                        if not bool(st.session_state.get(f"rename_sel_{uid}", False)):
-                            continue
-                        src = Path(p)
-                        if not src.exists():
-                            ops.append(("fail", f"不存在：{src}"))
-                            continue
-                        new_base = str(st.session_state.get(f"rename_new_{uid}") or "").strip()
-                        new_base = _sanitize_filename_component(new_base)
-                        if not new_base:
-                            ops.append(("skip", f"跳过（空名字）：{src.name}"))
-                            continue
-                        if new_base == src.stem:
-                            ops.append(("skip", f"跳过（未变化）：{src.name}"))
-                            continue
-                        dest = _unique_pdf_path(pdf_dir, new_base)
-                        try:
-                            src.rename(dest)
-                            try:
-                                lib_store.update_path(src, dest)
-                            except Exception:
-                                pass
-                            ops.append(("ok", f"{src.name} → {dest.name}"))
-                        except Exception as e:
-                            ops.append(("fail", f"{src.name} 重命名失败：{e}"))
-                            continue
-
-                        if also_md:
-                            try:
-                                old_folder = Path(md_out_root) / src.stem
-                                new_folder = Path(md_out_root) / dest.stem
-                                if old_folder.exists() and (not new_folder.exists()):
-                                    old_folder.rename(new_folder)
-                                    old_main = new_folder / f"{src.stem}.en.md"
-                                    if old_main.exists():
-                                        new_main = new_folder / f"{dest.stem}.en.md"
-                                        try:
-                                            old_main.rename(new_main)
-                                        except Exception:
-                                            pass
-                            except Exception:
-                                pass
-
-                    # Clear scan cache for this dir so the list refreshes next time.
-                    try:
-                        results_cache.pop(scan_key, None)
-                    except Exception:
-                        pass
-                    # Do not auto-rescan; let the user click "开始识别/刷新" to refresh suggestions.
-
-                    ok_n = sum(1 for s, _ in ops if s == "ok")
-                    fail_n = sum(1 for s, _ in ops if s == "fail")
-                    if ok_n:
-                        st.success(f"已重命名：{ok_n} 个文件")
-                    if fail_n:
-                        st.warning(f"失败：{fail_n} 个文件（可能是文件正被占用）")
-                    if ops:
-                        with st.expander("查看详情", expanded=False):
-                            for stt, msg in ops[:200]:
-                                (st.caption if stt in ("ok", "skip") else st.warning)(msg)
-
-                    # After applying, dismiss the prompt for this dir.
-                    try:
-                        dismissed.add(dir_sig)
-                    except Exception:
-                        pass
-                    st.experimental_rerun()
-            with c_apply[1]:
-                st.markdown(
-                    "<div class='refbox'>提示：如果你已经把某些 PDF 转换成 MD 并且已经建库，重命名后建议点一次「更新知识库」重新索引，以免旧路径残留。</div>",
-                    unsafe_allow_html=True,
-                )
-
-            # end expander
+    ensure_rename_manager_state()
+    render_rename_manager_panel(
+        pdf_dir=pdf_dir,
+        md_out_root=md_out_root,
+        pdfs=pdfs,
+        dir_sig=dir_sig,
+        dismissed_dirs=dismissed,
+        settings=settings,
+        lib_store=lib_store,
+    )
 
     st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
     st.subheader(S["convert_opts"])
@@ -5970,17 +5700,7 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
         converted = []
         pending = []
         for pdf in pdfs_view:
-            md_folder = Path(md_out_root) / pdf.stem
-            md_main = md_folder / f"{pdf.stem}.en.md"
-            md_exists = md_main.exists()
-            if not md_exists and md_folder.exists():
-                try:
-                    any_md = next(iter(sorted(md_folder.glob('*.md'))), None)
-                    if any_md:
-                        md_main = any_md
-                        md_exists = True
-                except Exception:
-                    pass
+            md_folder, md_main, md_exists = _resolve_md_output_paths(md_out_root, pdf)
             item = {"pdf": pdf, "md_folder": md_folder, "md_main": md_main, "md_exists": md_exists}
             (converted if md_exists else pending).append(item)
 
@@ -5994,9 +5714,12 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
             """
             Render background conversion progress where users are looking: under conversion tasks.
             """
-            nonlocal bg_auto_rerun_issued
             bg2 = _bg_snapshot()
-            running = bool(bg2.get("running")) or (bg2.get("total", 0) and bg2.get("done", 0) < bg2.get("total", 0))
+            q2 = list(bg2.get("queue") or [])
+            if (not bool(bg2.get("running"))) and q2:
+                _bg_ensure_started()
+                bg2 = _bg_snapshot()
+            running = bg_is_running_snapshot(bg2)
             if not running:
                 return
             done = int(bg2.get("done", 0) or 0)
@@ -6006,8 +5729,15 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
             p_done = int(bg2.get("cur_page_done", 0) or 0)
             p_total = int(bg2.get("cur_page_total", 0) or 0)
             p_msg = str(bg2.get("cur_page_msg") or "").strip()
+            p_profile = str(bg2.get("cur_profile") or "").strip()
+            p_llm = str(bg2.get("cur_llm_profile") or "").strip()
+            p_tail = list(bg2.get("cur_log_tail") or [])
             st.markdown("<div class='refbox'>\u540e\u53f0\u8f6c\u6362\u8fdb\u5ea6</div>", unsafe_allow_html=True)
             st.caption(f"{done}/{total}{(' | ' + cur) if cur else ''}")
+            if p_profile:
+                st.caption(p_profile)
+            if p_llm:
+                st.caption(p_llm)
             if total > 0:
                 st.progress(min(1.0, done / max(1, total)))
             if p_total > 0:
@@ -6030,11 +5760,10 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
                 if last:
                     st.caption(f"\u6700\u8fd1\u4e00\u6761\uff1a{last}")
 
-            # Auto refresh while running so the progress bar updates without manual clicks.
             auto_key = f"bg_auto_refresh_{key_ns}"
             if auto_key not in st.session_state:
                 st.session_state[auto_key] = True
-            auto = st.checkbox("\u81ea\u52a8\u5237\u65b0\u8fdb\u5ea6", value=bool(st.session_state.get(auto_key)), key=auto_key)
+            auto = st.checkbox("\u81ea\u52a8\u5237\u65b0\u8fdb\u5ea6", key=auto_key)
             if auto and running:
                 components.html(
                     """
@@ -6049,19 +5778,18 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
         root._kbAutoRefreshTimer = null;
         root.postMessage({ isStreamlitMessage: true, type: "streamlit:rerunScript" }, "*");
       } catch (e) {}
-    }, 1500);
+    }, 3500);
   } catch (e) {}
 })();
 </script>
                     """,
                     height=0,
                 )
-                # Reliable fallback: some Streamlit versions ignore JS postMessage reruns.
-                # Keep progress moving with a lightweight server-side polling rerun.
-                if not bg_auto_rerun_issued:
-                    bg_auto_rerun_issued = True
-                    time.sleep(0.9)
-                    st.experimental_rerun()
+
+            if p_tail:
+                with st.expander("\u8fdb\u5ea6\u65e5\u5fd7", expanded=False):
+                    for ln in p_tail[-12:]:
+                        st.caption(ln)
 
         def render_items(items: list[dict], *, show_missing_badge: bool, key_ns: str) -> None:
             from typing import Optional
@@ -6070,8 +5798,6 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
             queue_tasks = list(bg2.get("queue") or [])
             current_name = str(bg2.get("current") or "")
             running_any = bool(bg2.get("running"))
-            done = int(bg2.get("done", 0) or 0)
-            total = int(bg2.get("total", 0) or 0)
 
             def _queue_pos(pdf_path: Path) -> Optional[int]:
                 p = str(pdf_path)
@@ -6138,7 +5864,7 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
 
                     with c_top[2]:
                         if md_exists:
-                            replace = st.checkbox("\u66ff\u6362", value=False, key=f"{key_ns}_replace_md_{uid}")
+                            replace = st.checkbox("\u66ff\u6362", value=True, key=f"{key_ns}_replace_md_{uid}")
                             st.caption("\u66ff\u6362\u5df2\u6709 MD")
                         else:
                             replace = False
@@ -6153,15 +5879,13 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
                                 st.info("\u6b64\u6587\u4ef6\u5df2\u5728\u540e\u53f0\u961f\u5217\u4e2d\u3002")
                             else:
                                 _bg_enqueue(
-                                    {
-                                        "pdf": str(pdf),
-                                        "out_root": str(md_out_root),
-                                        "db_dir": str(db_dir),
-                                        "no_llm": bool(no_llm),
-                                        "eq_image_fallback": True,
-                                        "replace": bool(replace),
-                                        "name": pdf.name,
-                                    }
+                                    _build_bg_task(
+                                        pdf_path=pdf,
+                                        out_root=md_out_root,
+                                        db_dir=db_dir,
+                                        no_llm=bool(no_llm),
+                                        replace=bool(replace),
+                                    )
                                 )
                                 st.info("\u5df2\u52a0\u5165\u540e\u53f0\u961f\u5217\uff08\u4e0d\u4f1a\u5361\u4f4f\u9875\u9762\uff09\uff0c\u4f60\u53ef\u4ee5\u5207\u6362\u53bb\u201c\u5bf9\u8bdd\u201d\u9875\u7ee7\u7eed\u4f7f\u7528\u3002")
                                 st.experimental_rerun()
@@ -6177,11 +5901,9 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
                             if del_open:
                                 if st.button("\u53d6\u6d88", key=f"{key_ns}_del_btn_{uid}"):
                                     st.session_state[del_key] = False
-                                    st.experimental_rerun()
                             else:
                                 if st.button("\u5220\u9664", key=f"{key_ns}_del_btn_{uid}", help="\u5220\u9664 PDF \u6587\u4ef6\uff08\u4e0d\u53ef\u6062\u590d\uff09"):
                                     st.session_state[del_key] = True
-                                    st.experimental_rerun()
 
                     with c_top[5]:
                         md_name = md_main.name if md_exists else "\u2014"
@@ -6254,15 +5976,15 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
                     if st.button("\u6279\u91cf\u8f6c\u6362\u5168\u90e8\u672a\u8f6c\u6362\uff08\u540e\u53f0\uff09", key="bulk_convert_pending"):
                         for it in pending:
                             pdf = it["pdf"]
-                            _bg_enqueue({
-                                "pdf": str(pdf),
-                                "out_root": str(md_out_root),
-                                "db_dir": str(db_dir),
-                                "no_llm": bool(no_llm),
-                                "eq_image_fallback": True,
-                                "replace": False,
-                                "name": pdf.name,
-                            })
+                            _bg_enqueue(
+                                _build_bg_task(
+                                    pdf_path=pdf,
+                                    out_root=md_out_root,
+                                    db_dir=db_dir,
+                                    no_llm=bool(no_llm),
+                                    replace=False,
+                                )
+                            )
                         st.info(f"\u5df2\u628a {len(pending)} \u4e2a\u6587\u4ef6\u52a0\u5165\u540e\u53f0\u961f\u5217\u3002")
                         st.experimental_rerun()
                 with c_bulk[1]:
@@ -6307,7 +6029,6 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
                         if st.button(S["dup_skip"], key=f"dup_skip_{n}"):
                             handled[file_sha1] = {"action": "skipped", "msg": S["handled_skip"], "ts": time.time()}
                             st.info(S["handled_skip"])
-                            st.experimental_rerun()
                         else:
                             st.caption("\u5982\u679c\u4f60\u4e0d\u60f3\u91cd\u590d\u4fdd\u5b58\uff0c\u70b9\u51fb\u201c\u8df3\u8fc7\u201d\u5373\u53ef\u3002")
                         continue
@@ -6327,45 +6048,93 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
                 base = build_base_name(venue=venue, year=year, title=title)
                 st.text_input(S["base_name"], value=base, disabled=True, key=f"base_{n}")
 
-                dest_pdf = pdf_dir / f"{base}.pdf"
-                if dest_pdf.exists():
-                    k = 2
-                    while (pdf_dir / f"{base}-{k}.pdf").exists() and k < 100:
-                        k += 1
-                    dest_pdf = pdf_dir / f"{base}-{k}.pdf"
+                dest_pdf = _next_pdf_dest_path(pdf_dir, base)
 
                 action_cols = st.columns(2)
                 with action_cols[0]:
                     if st.button(S["save_pdf"], key=f"save_pdf_{n}"):
-                        try:
-                            if tmp_path.exists() and tmp_path.resolve() != dest_pdf.resolve():
-                                tmp_path.replace(dest_pdf)
-                        except Exception:
-                            dest_pdf.write_bytes(data)
+                        _persist_upload_pdf(tmp_path, dest_pdf, data)
                         lib_store.upsert(file_sha1, dest_pdf)
                         handled[file_sha1] = {"action": "saved", "msg": S["handled_saved"], "ts": time.time()}
                         st.info(f"{S['saved_as']}: {dest_pdf}")
 
                 with action_cols[1]:
                     if st.button(S["convert_now"], key=f"convert_now_{n}"):
-                        try:
-                            if tmp_path.exists() and tmp_path.resolve() != dest_pdf.resolve():
-                                tmp_path.replace(dest_pdf)
-                        except Exception:
-                            dest_pdf.write_bytes(data)
+                        _persist_upload_pdf(tmp_path, dest_pdf, data)
                         lib_store.upsert(file_sha1, dest_pdf)
                         handled[file_sha1] = {"action": "converted", "msg": S["handled_converted"], "ts": time.time()}
-                        _bg_enqueue({
-                            "pdf": str(dest_pdf),
-                            "out_root": str(md_out_root),
-                            "db_dir": str(db_dir),
-                            "no_llm": bool(no_llm),
-                            "eq_image_fallback": True,
-                            "replace": False,
-                            "name": dest_pdf.name,
-                        })
+                        _bg_enqueue(
+                            _build_bg_task(
+                                pdf_path=dest_pdf,
+                                out_root=md_out_root,
+                                db_dir=db_dir,
+                                no_llm=bool(no_llm),
+                                replace=False,
+                            )
+                        )
                         st.info("\u5df2\u52a0\u5165\u540e\u53f0\u961f\u5217\uff0c\u4f60\u53ef\u4ee5\u5207\u6362\u9875\u9762\u7ee7\u7eed\u4f7f\u7528\u3002")
                         st.experimental_rerun()
+
+
+def _teardown_chat_dock_runtime() -> None:
+    components.html(
+        """
+<script>
+(function () {
+  try {
+    const host = window.parent || window;
+    const root = host.document;
+    if (!root || !root.body) return;
+
+    const NS = "__kbDockManagerStableV3";
+    try {
+      if (host[NS] && typeof host[NS].destroy === "function") host[NS].destroy();
+      delete host[NS];
+    } catch (e) {}
+
+    try {
+      root.body.classList.remove("kb-resizing");
+      root.body.classList.remove("kb-live-streaming");
+    } catch (e) {}
+
+    const docks = root.querySelectorAll(".kb-input-dock, .kb-dock-positioned");
+    docks.forEach(function (el) {
+      try {
+        el.classList.remove("kb-input-dock", "kb-dock-positioned");
+        el.style.left = "";
+        el.style.right = "";
+        el.style.width = "";
+        el.style.transform = "";
+      } catch (e) {}
+    });
+  } catch (e) {}
+})();
+</script>
+        """,
+        height=0,
+    )
+
+
+def _set_live_streaming_mode(active: bool) -> None:
+    on_flag = "true" if bool(active) else "false"
+    components.html(
+        f"""
+<script>
+(function () {{
+  try {{
+    const host = window.parent || window;
+    const root = host.document;
+    if (!root || !root.body) return;
+    const on = {on_flag};
+    if (on) root.body.classList.add("kb-live-streaming");
+    else root.body.classList.remove("kb-live-streaming");
+  }} catch (e) {{}}
+}})();
+</script>
+        """,
+        height=0,
+    )
+
 
 def main() -> None:
     st.set_page_config(page_title=S["title"], layout="wide")
@@ -6445,7 +6214,7 @@ def main() -> None:
         # Background conversion status (shown on every page)
         _bg_ensure_started()
         bg = _bg_snapshot()
-        if bg.get("running") or (bg.get("total", 0) and bg.get("done", 0) < bg.get("total", 0)):
+        if bg_is_running_snapshot(bg):
             done = int(bg.get("done", 0) or 0)
             total = int(bg.get("total", 0) or 0)
             cur = bg.get("current", "")
@@ -6574,8 +6343,6 @@ def main() -> None:
             if "conv_select" in st.session_state:
                 del st.session_state["conv_select"]
 
-            st.experimental_rerun()
-
     # Retriever (auto-reload when DB changes)
     docs_json = db_dir / "docs.json"
     cur_mtime = docs_json.stat().st_mtime if docs_json.exists() else None
@@ -6596,6 +6363,9 @@ def main() -> None:
         st.session_state["conv_id"] = chat_store.create_conversation()
 
     st.session_state["messages"] = chat_store.get_messages(st.session_state["conv_id"])
+
+    if page != S["page_chat"]:
+        _teardown_chat_dock_runtime()
 
     # Pages
     if page == S["page_chat"]:

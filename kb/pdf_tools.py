@@ -586,18 +586,148 @@ def run_pdf_to_md(
 
     # Prefer an explicit path override (portable across machines / folders):
     # - KB_PDF_CONVERTER: absolute path to a converter script (e.g. test2.py)
-    # - fallback: resolve to repo-relative ../..../test2.py from this file
+    # - fallback: resolve to repo-local ../test2.py from this file.
+    #   Keep a legacy fallback to ../../test2.py for older layouts.
     override = (os.environ.get("KB_PDF_CONVERTER") or "").strip().strip('"').strip("'")
     if override:
         script = Path(override).expanduser()
     else:
-        script = Path(__file__).resolve().parents[2] / "test2.py"
+        local_script = Path(__file__).resolve().parents[1] / "test2.py"
+        legacy_script = Path(__file__).resolve().parents[2] / "test2.py"
+        script = local_script if local_script.exists() else legacy_script
     if not script.exists():
         # Collaborator-friendly fallback: still produce an .en.md so the app can run.
         return _fallback_convert()
 
     # -u: unbuffered, so we can parse per-page progress from stdout in real time.
     args = [sys.executable, "-u", str(script), "--pdf", str(pdf_path), "--out", str(out_root)]
+
+    def _env_int(name: str, default: int = 0, *, lo: int = 0, hi: int = 256) -> int:
+        raw = (os.environ.get(name) or "").strip()
+        if not raw:
+            return int(default)
+        try:
+            v = int(raw)
+        except Exception:
+            return int(default)
+        return max(lo, min(hi, v))
+
+    def _env_bool(name: str, default: bool = False) -> bool:
+        raw = (os.environ.get(name) or "").strip().lower()
+        if not raw:
+            return bool(default)
+        return raw in {"1", "true", "yes", "y", "on"}
+
+    def _probe_pdf_pages(path: Path) -> int:
+        try:
+            with fitz.open(str(path)) as d:
+                return int(getattr(d, "page_count", 0) or 0)
+        except Exception:
+            return 0
+
+    def _auto_llm_workers_defaults(pages: int, cpu: int) -> tuple[int, int]:
+        # Keep quality settings intact; only tune concurrency.
+        if pages <= 3:
+            workers = 1
+        elif pages <= 8:
+            workers = 2
+        elif pages <= 20:
+            workers = 3
+        else:
+            workers = 4
+
+        llm_workers = 1 if pages <= 4 else 2
+
+        if cpu <= 2:
+            workers = 1
+            llm_workers = 1
+        elif cpu <= 4:
+            workers = min(workers, 2)
+        elif cpu <= 6:
+            workers = min(workers, 3)
+        else:
+            workers = min(workers, 4)
+
+        max_inflight = 6
+        while (workers * llm_workers) > max_inflight:
+            if llm_workers > 1:
+                llm_workers -= 1
+            elif workers > 1:
+                workers -= 1
+            else:
+                break
+        return max(1, workers), max(1, llm_workers)
+
+    def _auto_no_llm_workers_default(pages: int, cpu: int) -> int:
+        if pages <= 2:
+            return 1
+        if cpu <= 2:
+            return 1
+        return max(2, min(12, cpu - 1))
+
+    page_count = _probe_pdf_pages(pdf_path)
+    cpu_count = max(1, int(os.cpu_count() or 1))
+
+    # Web/UI conversion defaults to an adaptive profile:
+    # - keep quality features on
+    # - tune concurrency by document size and host CPU
+    classify_batch_size = _env_int("KB_PDF_CLASSIFY_BATCH_SIZE", default=80, lo=8, hi=256)
+    if classify_batch_size > 0:
+        args.extend(["--classify-batch-size", str(classify_batch_size)])
+
+    if bool(no_llm):
+        ui_workers_default = _auto_no_llm_workers_default(page_count, cpu_count)
+        ui_llm_workers_default = 0
+    else:
+        ui_workers_default, ui_llm_workers_default = _auto_llm_workers_defaults(page_count, cpu_count)
+
+    ui_workers = _env_int("KB_PDF_WORKERS", default=ui_workers_default, lo=0, hi=64)
+    if ui_workers > 0:
+        args.extend(["--workers", str(ui_workers)])
+    ui_llm_workers = _env_int("KB_PDF_LLM_WORKERS", default=ui_llm_workers_default, lo=0, hi=32)
+    if ui_llm_workers > 0:
+        args.extend(["--llm-workers", str(ui_llm_workers)])
+
+    ui_llm_timeout = _env_int("KB_PDF_LLM_TIMEOUT_S", default=25, lo=1, hi=600)
+    if ui_llm_timeout > 0:
+        args.extend(["--llm-timeout", str(ui_llm_timeout)])
+    ui_llm_retries = _env_int("KB_PDF_LLM_RETRIES", default=0, lo=0, hi=20)
+    args.extend(["--llm-retries", str(ui_llm_retries)])
+
+    auto_page_llm_threshold_default = 8
+    if page_count >= 15:
+        auto_page_llm_threshold_default = 10
+    if page_count >= 30:
+        auto_page_llm_threshold_default = 12
+    auto_page_llm_threshold = _env_int(
+        "KB_PDF_AUTO_PAGE_LLM_THRESHOLD",
+        default=auto_page_llm_threshold_default,
+        lo=0,
+        hi=200,
+    )
+    args.extend(["--auto-page-llm-threshold", str(auto_page_llm_threshold)])
+    if _env_bool("KB_PDF_FAST", default=False):
+        args.append("--fast")
+
+    if progress_cb is not None:
+        try:
+            progress_cb(
+                0,
+                0,
+                (
+                    "converter profile: "
+                    f"script={str(script)}, "
+                    f"workers={ui_workers if ui_workers > 0 else 'auto'}, "
+                    f"llm_workers={ui_llm_workers if ui_llm_workers > 0 else 'auto'}, "
+                    f"llm_timeout={ui_llm_timeout}s, llm_retries={ui_llm_retries}, "
+                    f"auto_page_llm_threshold={auto_page_llm_threshold}, "
+                    f"classify_batch={classify_batch_size}, "
+                    f"pages={page_count}, cpu={cpu_count}"
+                ),
+            )
+        except Exception:
+            pass
+
     if keep_debug:
         args.append("--keep-debug")
     if no_llm:
@@ -661,6 +791,8 @@ def run_pdf_to_md(
 
         re_pages = re.compile(r"\bpages\s*:\s*(\d+)\b", flags=re.IGNORECASE)
         re_prog = re.compile(r"Processing\s+page\s+(\d+)\s*/\s*(\d+)", flags=re.IGNORECASE)
+        re_done = re.compile(r"Finished\s+page\s+(\d+)\s*/\s*(\d+)", flags=re.IGNORECASE)
+        done_pages: set[int] = set()
         last_line_ts = time.time()
         last_heartbeat_ts = 0.0
         rc_override: Optional[int] = None
@@ -690,8 +822,16 @@ def run_pdf_to_md(
                 m2 = re_prog.search(s)
                 if m2:
                     try:
-                        p_done = int(m2.group(1))
                         p_total = max(p_total, int(m2.group(2)))
+                    except Exception:
+                        pass
+                m3 = re_done.search(s)
+                if m3:
+                    try:
+                        pg = int(m3.group(1))
+                        p_total = max(p_total, int(m3.group(2)))
+                        done_pages.add(pg)
+                        p_done = max(p_done, len(done_pages))
                     except Exception:
                         pass
                 try:
