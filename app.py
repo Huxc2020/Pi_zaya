@@ -1141,15 +1141,32 @@ div[role="listbox"]{
 li[data-testid="stSelectboxVirtualDropdownOption"],
 div[role="option"]{ color: var(--text-main) !important; }
 
+div[data-baseweb="tab-list"]{
+  gap: 0.48rem !important;
+  border-bottom: 1px solid var(--line) !important;
+  padding: 0.04rem 0 0.16rem 0 !important;
+}
+div[data-baseweb="tab-highlight"]{
+  display: none !important;
+}
 button[data-baseweb="tab"]{
-  background: var(--btn-bg) !important;
+  background: color-mix(in srgb, var(--btn-bg) 84%, transparent) !important;
   border: 1px solid var(--btn-border) !important;
+  color: var(--text-soft) !important;
+  border-radius: 12px !important;
+  padding: 0.42rem 0.9rem !important;
+  font-weight: 620 !important;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease !important;
+}
+button[data-baseweb="tab"]:hover{
+  background: var(--btn-hover) !important;
+  border-color: var(--blue-line) !important;
   color: var(--text-main) !important;
-  border-radius: 10px 10px 0 0 !important;
 }
 button[data-baseweb="tab"][aria-selected="true"]{
   background: var(--blue-weak) !important;
   border-color: var(--blue-line) !important;
+  color: var(--text-main) !important;
 }
 
 details[data-testid="stExpander"]{
@@ -1193,6 +1210,30 @@ pre, pre *{
   text-decoration: none !important;
   background-image: none !important;
 }
+.kb-plain-code{
+  margin: 0 !important;
+  white-space: pre !important;
+  overflow-x: auto !important;
+  border: 0 !important;
+  border-radius: 10px !important;
+  box-shadow: none !important;
+}
+.kb-plain-code code{
+  display: block !important;
+  white-space: pre !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  text-decoration: none !important;
+  background-image: none !important;
+}
+.kb-plain-code,
+.kb-plain-code *{
+  border-bottom: 0 !important;
+  text-decoration: none !important;
+  text-decoration-line: none !important;
+  box-shadow: none !important;
+  background-image: none !important;
+}
 div[data-testid="stCodeBlock"],
 div[data-testid="stCode"],
 .stCodeBlock{
@@ -1233,8 +1274,72 @@ div[data-testid="stCode"] span,
 .msg-ai pre span{
   background: transparent !important;
   border: 0 !important;
+  border-bottom: 0 !important;
   box-shadow: none !important;
   text-decoration: none !important;
+}
+div[data-testid="stCodeBlock"] pre *,
+div[data-testid="stCode"] pre *,
+.stCodeBlock pre *{
+  border: 0 !important;
+  border-bottom: 0 !important;
+  outline: 0 !important;
+  box-shadow: none !important;
+  text-decoration: none !important;
+  background-image: none !important;
+}
+div[data-testid="stCodeBlock"] div,
+div[data-testid="stCode"] div,
+.stCodeBlock div,
+div[data-testid="stCodeBlock"] [class*="line"],
+div[data-testid="stCode"] [class*="line"],
+.stCodeBlock [class*="line"],
+div[data-testid="stCodeBlock"] [style*="border-bottom"],
+div[data-testid="stCode"] [style*="border-bottom"],
+.stCodeBlock [style*="border-bottom"]{
+  border-bottom: 0 !important;
+  box-shadow: none !important;
+  text-decoration: none !important;
+  background-image: none !important;
+}
+div[data-testid="stCodeBlock"] table,
+div[data-testid="stCodeBlock"] tbody,
+div[data-testid="stCodeBlock"] tr,
+div[data-testid="stCodeBlock"] td,
+div[data-testid="stCodeBlock"] th,
+div[data-testid="stCode"] table,
+div[data-testid="stCode"] tbody,
+div[data-testid="stCode"] tr,
+div[data-testid="stCode"] td,
+div[data-testid="stCode"] th,
+.stCodeBlock table,
+.stCodeBlock tbody,
+.stCodeBlock tr,
+.stCodeBlock td,
+.stCodeBlock th{
+  border: 0 !important;
+  border-bottom: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  background-image: none !important;
+}
+div[data-testid="stCodeBlock"] :where(div, span, td, th, p, code),
+div[data-testid="stCode"] :where(div, span, td, th, p, code),
+.stCodeBlock :where(div, span, td, th, p, code){
+  text-decoration: none !important;
+  text-decoration-line: none !important;
+  text-decoration-thickness: 0 !important;
+  text-underline-offset: 0 !important;
+}
+div[data-testid="stCodeBlock"] *::before,
+div[data-testid="stCodeBlock"] *::after,
+div[data-testid="stCode"] *::before,
+div[data-testid="stCode"] *::after,
+.stCodeBlock *::before,
+.stCodeBlock *::after{
+  border-bottom: 0 !important;
+  box-shadow: none !important;
+  background-image: none !important;
 }
 .stMarkdown :not(pre) > code,
 .msg-ai :not(pre) > code{
@@ -1855,11 +1960,39 @@ def _inject_copy_js() -> None:
   }
 
   function hookCodeBlocks() {
+    function normalizeNativeCodeBlocks() {
+      const blocks = root.querySelectorAll('div[data-testid="stCodeBlock"], div[data-testid="stCode"], .stCodeBlock');
+      for (const block of blocks) {
+        if (!block || !block.dataset) continue;
+        if (block.dataset.kbNormalized === "1") continue;
+        let codeNode = null;
+        try {
+          codeNode = block.querySelector("pre code, code");
+        } catch (e) {
+          codeNode = null;
+        }
+        if (!codeNode) continue;
+        const txt = String(codeNode.innerText || codeNode.textContent || "");
+        if (!txt.trim()) continue;
+        try {
+          block.innerHTML = "";
+          const pre = root.createElement("pre");
+          pre.className = "kb-plain-code";
+          const code = root.createElement("code");
+          code.textContent = txt.replace(/\r\n/g, "\n");
+          pre.appendChild(code);
+          block.appendChild(pre);
+          block.dataset.kbNormalized = "1";
+        } catch (e) {}
+      }
+    }
+
     function hasNativeCopy(pre) {
       if (!pre) return false;
       try {
-        if (pre.closest('div[data-testid="stCodeBlock"], div[data-testid="stCode"], .stCodeBlock')) {
-          return true;
+        const hostBlock = pre.closest('div[data-testid="stCodeBlock"], div[data-testid="stCode"], .stCodeBlock');
+        if (hostBlock) {
+          return String(hostBlock.dataset && hostBlock.dataset.kbNormalized || "") !== "1";
         }
         const host = pre.parentElement;
         if (!host) return false;
@@ -1871,6 +2004,8 @@ def _inject_copy_js() -> None:
         return false;
       }
     }
+
+    normalizeNativeCodeBlocks();
 
     const pres = root.querySelectorAll("pre");
     for (const pre of pres) {
@@ -2028,9 +2163,44 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
     }} catch (e) {{}}
   }}
 
+  function clearCodeLineArtifacts() {{
+    try {{
+      const blocks = doc.querySelectorAll('div[data-testid="stCodeBlock"], div[data-testid="stCode"], .stCodeBlock');
+      for (const block of blocks) {{
+        const hrs = block.querySelectorAll("hr");
+        for (const h of hrs) {{
+          if (!h || !h.style) continue;
+          h.style.setProperty("display", "none", "important");
+          h.style.setProperty("border", "0", "important");
+          h.style.setProperty("border-bottom", "0", "important");
+          h.style.setProperty("height", "0", "important");
+          h.style.setProperty("margin", "0", "important");
+          h.style.setProperty("padding", "0", "important");
+        }}
+
+        const nodes = block.querySelectorAll("*");
+        for (const n of nodes) {{
+          if (!n || !n.style) continue;
+          const tag = String(n.tagName || "").toLowerCase();
+          if (tag === "button" || n.closest("button")) continue;
+          if (n.classList && n.classList.contains("kb-codecopy")) continue;
+          n.style.setProperty("border-bottom", "0", "important");
+          n.style.setProperty("box-shadow", "none", "important");
+          n.style.setProperty("outline", "0", "important");
+          n.style.setProperty("text-decoration", "none", "important");
+          n.style.setProperty("text-decoration-line", "none", "important");
+          n.style.setProperty("text-decoration-thickness", "0", "important");
+          n.style.setProperty("text-underline-offset", "0", "important");
+          n.style.setProperty("background-image", "none", "important");
+        }}
+      }}
+    }} catch (e) {{}}
+  }}
+
   function applyNow() {{
     clearInlineThemeForRefs();
     normalizeSidebarCloseIcon();
+    clearCodeLineArtifacts();
   }}
 
   let raf = 0;
