@@ -46,6 +46,27 @@ def _cache_get(bucket: str, key: str):
 def _cache_set(bucket: str, key: str, val, *, max_items: int = 600) -> None:
     _CACHE_SET(bucket, key, val, max_items=max_items)
 
+
+def _is_temp_source_path(source_path: str) -> bool:
+    s = (source_path or "").strip()
+    if not s:
+        return True
+    p = Path(s)
+    low_parts = [str(x).strip().lower() for x in p.parts]
+    low_name = p.name.lower()
+    low_stem = p.stem.lower()
+    if any(x in {"temp", "__pycache__"} for x in low_parts):
+        return True
+    if any(x.startswith("__upload__") or x.startswith("_tmp_") or x.startswith("tmp_") for x in low_parts):
+        return True
+    if low_name.startswith("__upload__") or low_stem.startswith("__upload__"):
+        return True
+    if low_name.startswith("_tmp_") or low_stem.startswith("_tmp_"):
+        return True
+    if low_name.startswith("tmp_") or low_stem.startswith("tmp_"):
+        return True
+    return False
+
 def _top_heading(heading_path: str) -> str:
     hp = (heading_path or "").strip()
     if not hp:
@@ -239,6 +260,7 @@ def _search_hits_with_fallback(
     """
     q1 = (prompt_text or "").strip()
     hits1 = retriever.search(q1, top_k=max(10, top_k * 6)) if q1 else []
+    hits1 = [h for h in (hits1 or []) if not _is_temp_source_path(str((h.get("meta") or {}).get("source_path") or ""))]
     scores1 = [float(h.get("score", 0.0) or 0.0) for h in hits1]
     best1 = float(max(scores1) if scores1 else 0.0)
 
@@ -248,6 +270,7 @@ def _search_hits_with_fallback(
     q2 = _translate_query_for_search(settings, q1) if bool(allow_translate) else None
     if q2:
         hits2 = retriever.search(q2, top_k=max(10, top_k * 6))
+        hits2 = [h for h in (hits2 or []) if not _is_temp_source_path(str((h.get("meta") or {}).get("source_path") or ""))]
         scores2 = [float(h.get("score", 0.0) or 0.0) for h in hits2]
         best2 = float(max(scores2) if scores2 else 0.0)
         # Prefer translated retrieval when it yields a more meaningful signal.
@@ -273,7 +296,7 @@ def _group_hits_by_doc_for_refs(
     for h in hits_raw or []:
         meta = h.get("meta", {}) or {}
         src = (meta.get("source_path") or "").strip()
-        if not src:
+        if (not src) or _is_temp_source_path(src):
             continue
         by_doc.setdefault(src, []).append(h)
 
@@ -486,7 +509,7 @@ def _group_hits_by_doc_for_refs_fast(hits_raw: list[dict], top_k_docs: int) -> l
     for h in hits_raw or []:
         meta = h.get("meta", {}) or {}
         src = (meta.get("source_path") or "").strip()
-        if not src:
+        if (not src) or _is_temp_source_path(src):
             continue
         cur = by_doc.get(src)
         sc = float(h.get("score", 0.0) or 0.0)

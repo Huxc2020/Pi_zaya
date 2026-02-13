@@ -244,17 +244,20 @@ def _render_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
     _muted(f"\u5171 {len(rows)} \u6761\u5efa\u8bae")
 
-    bulk_cols = st.columns([1.25, 1.25, 7.5])
+    uids = [hashlib.md5(str(row.get("path") or "").encode("utf-8", "ignore")).hexdigest()[:10] for row in rows]
+    selected_n = sum(1 for uid in uids if bool(st.session_state.get(f"rename_sel_{uid}", False)))
+    all_selected = (len(uids) > 0) and (selected_n == len(uids))
+
+    bulk_cols = st.columns([1.5, 8.5])
     with bulk_cols[0]:
-        if st.button("\u5168\u9009", key="rename_sel_all"):
-            for row in rows:
-                uid = hashlib.md5(str(row.get("path") or "").encode("utf-8", "ignore")).hexdigest()[:10]
-                st.session_state[f"rename_sel_{uid}"] = True
+        toggle_label = "\u5168\u4e0d\u9009" if all_selected else "\u5168\u9009"
+        if st.button(toggle_label, key="rename_sel_toggle"):
+            target = not all_selected
+            for uid in uids:
+                st.session_state[f"rename_sel_{uid}"] = target
+            st.experimental_rerun()
     with bulk_cols[1]:
-        if st.button("\u5168\u4e0d\u9009", key="rename_sel_none"):
-            for row in rows:
-                uid = hashlib.md5(str(row.get("path") or "").encode("utf-8", "ignore")).hexdigest()[:10]
-                st.session_state[f"rename_sel_{uid}"] = False
+        _muted(f"\u5df2\u9009 {selected_n}/{len(uids)}")
 
     for row in rows[:400]:
         pdf_path_str = str(row.get("path") or "")
@@ -331,7 +334,7 @@ def _apply_renames(
     with apply_cols[0]:
         apply_now = st.button("\u5e94\u7528\u91cd\u547d\u540d", key="rename_apply_btn")
     with apply_cols[1]:
-        _muted("重命名后，建议点一次“更新知识库”。")
+        _muted("重命名后会提示更新知识库。")
 
     if not apply_now:
         return
@@ -375,15 +378,32 @@ def _apply_renames(
             try:
                 old_folder = Path(md_out_root) / src.stem
                 new_folder = Path(md_out_root) / dest.stem
-                if old_folder.exists() and (not new_folder.exists()):
-                    old_folder.rename(new_folder)
-                    old_main = new_folder / f"{src.stem}.en.md"
-                    if old_main.exists():
-                        new_main = new_folder / f"{dest.stem}.en.md"
-                        try:
-                            old_main.rename(new_main)
-                        except Exception:
-                            pass
+                target_folder: Path | None = None
+
+                if old_folder.exists():
+                    if not new_folder.exists():
+                        old_folder.rename(new_folder)
+                        target_folder = new_folder
+                    else:
+                        target_folder = new_folder
+                elif new_folder.exists():
+                    target_folder = new_folder
+
+                if target_folder and target_folder.exists():
+                    new_main = target_folder / f"{dest.stem}.en.md"
+                    if not new_main.exists():
+                        candidates = [
+                            x
+                            for x in sorted(target_folder.glob("*.md"))
+                            if x.is_file() and x.name.lower() != "assets_manifest.md" and x.name != new_main.name
+                        ]
+                        if candidates:
+                            prefer = [x for x in candidates if x.name.lower().endswith(".en.md")]
+                            src_main = prefer[0] if prefer else candidates[0]
+                            try:
+                                src_main.rename(new_main)
+                            except Exception:
+                                pass
             except Exception:
                 pass
 
@@ -396,6 +416,9 @@ def _apply_renames(
     ok_n = sum(1 for status, _ in operations if status == "ok")
     skip_n = sum(1 for status, _ in operations if status == "skip")
     fail_n = sum(1 for status, _ in operations if status == "fail")
+    if ok_n > 0:
+        st.session_state["kb_reindex_pending"] = True
+        st.session_state.pop("_kb_reindex_hint_cache", None)
 
     st.markdown(
         (
@@ -420,17 +443,7 @@ def _apply_renames(
         sel_key = f"rename_detail_sel_{scan_key}"
         if sel_key not in st.session_state:
             st.session_state[sel_key] = detail_lines[0]
-        selected_detail = st.selectbox("处理详情", options=detail_lines, key=sel_key)
-        st.markdown(
-            (
-                "<div style='margin-top:0.18rem; padding:0.38rem 0.50rem; border-radius:8px; border:1px solid var(--line); "
-                "background:rgba(148,163,184,0.08); font-family:Consolas, monospace; font-size:0.78rem; "
-                "white-space:nowrap; overflow-x:auto; color:var(--text-soft);'>"
-                f"{html.escape(selected_detail)}"
-                "</div>"
-            ),
-            unsafe_allow_html=True,
-        )
+        st.selectbox("处理详情", options=detail_lines, key=sel_key)
 
     try:
         dismissed_dirs.add(dir_sig)
@@ -464,20 +477,21 @@ def render_panel(
         st.session_state["rename_also_md"] = True
         st.session_state["rename_scan_use_llm"] = True
 
-        top_cols = st.columns([1.0, 2.2, 1.8])
+        top_cols = st.columns([2.6, 1.7, 0.45])
         with top_cols[0]:
-            if st.button("\u5173\u95ed", key="rename_mgr_close"):
-                st.session_state["rename_mgr_open"] = False
-                st.experimental_rerun()
-        with top_cols[1]:
             options = ["\u6700\u8fd1 30 \u7bc7", "\u6700\u8fd1 50 \u7bc7", "\u6700\u8fd1 100 \u7bc7", "\u5168\u90e8"]
             current_scope = str(st.session_state.get("rename_scan_scope") or "\u6700\u8fd1 30 \u7bc7")
             if current_scope not in options:
                 st.session_state["rename_scan_scope"] = options[0]
             scope = st.selectbox("\u626b\u63cf\u8303\u56f4", options=options, key="rename_scan_scope")
-        with top_cols[2]:
+        with top_cols[1]:
             st.markdown("<div style='height:1.82rem;'></div>", unsafe_allow_html=True)
             scan_now = st.button("\u5f00\u59cb\u8bc6\u522b/\u5237\u65b0", key="rename_scan_btn")
+        with top_cols[2]:
+            st.markdown("<div style='height:1.82rem;'></div>", unsafe_allow_html=True)
+            if st.button("\u00d7", key="rename_mgr_close_x", help="\u5173\u95ed\u6587\u4ef6\u540d\u7ba1\u7406"):
+                st.session_state["rename_mgr_open"] = False
+                st.experimental_rerun()
         use_llm = bool(st.session_state.get("rename_scan_use_llm"))
         scan_key = _scan_cache_key(dir_sig=dir_sig, scope=str(scope), use_llm=use_llm, expected_ver=expected_ver)
         results_cache = st.session_state.setdefault("rename_scan_results_cache", {})

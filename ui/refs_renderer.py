@@ -43,6 +43,27 @@ def _display_source_name(source_path: str) -> str:
     return _trim_middle(name, max_len=78)
 
 
+def _is_temp_source_path(source_path: str) -> bool:
+    s = (source_path or "").strip()
+    if not s:
+        return True
+    p = Path(s)
+    parts = [str(x).strip().lower() for x in p.parts]
+    name = p.name.lower()
+    stem = p.stem.lower()
+    if any(x in {"temp", "__pycache__"} for x in parts):
+        return True
+    if any(x.startswith("__upload__") or x.startswith("_tmp_") or x.startswith("tmp_") for x in parts):
+        return True
+    if name.startswith("__upload__") or stem.startswith("__upload__"):
+        return True
+    if name.startswith("_tmp_") or stem.startswith("_tmp_"):
+        return True
+    if name.startswith("tmp_") or stem.startswith("tmp_"):
+        return True
+    return False
+
+
 def _lookup_pdf_by_stem(pdf_root: Path, stem: str) -> Path | None:
     stem = (stem or "").strip()
     if not stem:
@@ -66,7 +87,53 @@ def _lookup_pdf_by_stem(pdf_root: Path, stem: str) -> Path | None:
                 return p
     except Exception:
         pass
-    return None
+
+    # Robust fallback: match by normalized title/year in filename.
+    src_year, src_title_key = _parse_name_year_title_key(stem)
+    if not src_title_key:
+        return None
+
+    best_path: Path | None = None
+    best_score = -1.0
+    try:
+        for p in pdf_root.glob("*.pdf"):
+            cand_year, cand_title_key = _parse_name_year_title_key(p.stem)
+            if not cand_title_key:
+                continue
+
+            score = 0.0
+            if src_title_key == cand_title_key:
+                score = 6.0
+            elif (src_title_key in cand_title_key) or (cand_title_key in src_title_key):
+                score = 5.0
+            else:
+                a = set(src_title_key.split())
+                b = set(cand_title_key.split())
+                if a and b:
+                    jacc = float(len(a & b)) / float(max(1, len(a | b)))
+                    if jacc >= 0.74:
+                        score = 3.0 + jacc
+
+            if score <= 0.0:
+                continue
+
+            if src_year and cand_year:
+                try:
+                    dy = abs(int(src_year) - int(cand_year))
+                except Exception:
+                    dy = 99
+                if dy == 0:
+                    score += 2.0
+                elif dy == 1:
+                    score += 1.0
+
+            if score > best_score:
+                best_score = score
+                best_path = p
+    except Exception:
+        return None
+
+    return best_path
 
 
 def _open_pdf(pdf_path: Path) -> tuple[bool, str]:
@@ -138,6 +205,29 @@ def _score_tier(score: float) -> str:
     if score >= 4.0:
         return "mid"
     return "low"
+
+
+def _normalize_name_key(text: str) -> str:
+    s = html.unescape((text or "").strip()).lower()
+    s = s.replace("‐", "-").replace("‑", "-").replace("–", "-").replace("—", "-")
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _parse_name_year_title_key(stem_like: str) -> tuple[str, str]:
+    s = (stem_like or "").strip()
+    if not s:
+        return "", ""
+    if s.lower().endswith(".en"):
+        s = s[:-3]
+    m = re.search(r"(19\d{2}|20\d{2})", s)
+    if not m:
+        return "", _normalize_name_key(s)
+    year = m.group(1)
+    title = s[m.end() :].lstrip(" -_.")
+    if not title:
+        title = s
+    return year, _normalize_name_key(title)
 
 
 def _snippet(text: str, *, heading: str = "", max_chars: int = 260) -> str:
@@ -259,14 +349,54 @@ def fetch_crossref_meta(title: str, *, source_path: str = "", expected_venue: st
     doi_hint = extract_first_doi(source_path)
     if not doi_hint:
         doi_hint = extract_first_doi(_load_source_preview_text(source_path))
+    venue = (expected_venue or "").strip()
+    year = (expected_year or "").strip()
 
-    return fetch_best_crossref_meta(
-        query_title=q,
-        expected_year=expected_year,
-        expected_venue=expected_venue,
-        doi_hint=doi_hint,
-        min_score=0.90,
-    )
+    def _try(query_title: str, *, y: str, v: str, min_score: float, allow_title_only: bool = False) -> dict | None:
+        return fetch_best_crossref_meta(
+            query_title=query_title,
+            expected_year=y,
+            expected_venue=v,
+            doi_hint=doi_hint,
+            min_score=min_score,
+            allow_title_only=allow_title_only,
+        )
+
+    # 1) Strict: year + venue (or what we currently know).
+    out = _try(q, y=year, v=venue, min_score=0.90)
+    if isinstance(out, dict):
+        return out
+
+    # 2) Safe fallback for citation rendering:
+    #    keep venue constraint, relax year (Crossref often stores online/print year differently).
+    if year:
+        out = _try(q, y="", v=venue, min_score=0.90)
+        if isinstance(out, dict):
+            return out
+
+    # 3) Very strict title-only fallback.
+    if len(q) >= 24:
+        out = _try(q, y="", v="", min_score=0.97, allow_title_only=True)
+        if isinstance(out, dict):
+            return out
+
+    # 4) Retry once with filename title when extracted first-line title is noisy.
+    _, _, file_title = _parse_filename_meta(source_path)
+    file_q = (file_title or "").strip()
+    if file_q and file_q != q:
+        out = _try(file_q, y=year, v=venue, min_score=0.90)
+        if isinstance(out, dict):
+            return out
+        if year:
+            out = _try(file_q, y="", v=venue, min_score=0.90)
+            if isinstance(out, dict):
+                return out
+        if len(file_q) >= 24:
+            out = _try(file_q, y="", v="", min_score=0.97, allow_title_only=True)
+            if isinstance(out, dict):
+                return out
+
+    return None
 
 
 def _parse_filename_meta(path_str: str) -> tuple[str, str, str]:
@@ -280,12 +410,15 @@ def _parse_filename_meta(path_str: str) -> tuple[str, str, str]:
 
 
 # --- Callback Function (THE FIX) ---
-def _on_cite_click(cite_key: str, net_key: str, source_path: str):
+def _on_cite_click(cite_key: str, net_key: str, source_path: str, refs_open_key: str = ""):
     """
     This runs BEFORE the UI re-renders.
     It fetches data immediately, updates session_state,
     so the UI just wakes up with the data ready.
     """
+    if refs_open_key:
+        st.session_state[refs_open_key] = True
+
     # 1. Toggle visibility
     new_state = not st.session_state.get(cite_key, False)
     st.session_state[cite_key] = new_state
@@ -319,13 +452,22 @@ def _render_refs(
         prompt: str = "",
         show_heading: bool = True,
         key_ns: str = "refs",
+        refs_open_key: str = "",
         settings=None,
 ) -> None:
     del prompt, settings  # backward compatibility
 
+    filtered_hits: list[dict] = []
+    for h in hits or []:
+        meta = h.get("meta", {}) or {}
+        src = str(meta.get("source_path") or "").strip()
+        if _is_temp_source_path(src):
+            continue
+        filtered_hits.append(h)
+
     if show_heading:
         st.markdown(f"### {S['refs']}")
-    if not hits:
+    if not filtered_hits:
         st.markdown(f"<div class='refbox'>{S['kb_miss']}</div>", unsafe_allow_html=True)
         return
 
@@ -335,7 +477,7 @@ def _render_refs(
     if not show_context:
         st.markdown("<div class='ref-muted-note'>Snippet preview is off.</div>", unsafe_allow_html=True)
 
-    for i, h in enumerate(hits, start=1):
+    for i, h in enumerate(filtered_hits, start=1):
         meta = h.get("meta", {}) or {}
         source_path = str(meta.get("source_path") or "").strip()
         heading = str(meta.get("top_heading") or _top_heading(str(meta.get("heading_path") or "")) or "").strip()
@@ -379,25 +521,27 @@ def _render_refs(
             )
 
         pdf_path = _resolve_pdf_for_source(pdf_root, source_path)
-        uid = hashlib.sha1((str(pdf_path) + "|" + str(i)).encode("utf-8", "ignore")).hexdigest()[:10]
-
-        if not pdf_path:
-            st.markdown("<div class='ref-item-gap'></div>", unsafe_allow_html=True)
-            continue
+        has_pdf = bool(pdf_path)
+        # Stable uid: independent from ranking index, so Cite toggle won't require a second click.
+        uid = hashlib.sha1(str(source_path).encode("utf-8", "ignore")).hexdigest()[:10]
 
         # UI: Open | Page | Cite
         cols = st.columns([0.85, 0.85, 0.85, 7.5])
 
         with cols[0]:
-            if st.button("Open", key=f"{key_ns}_open_pdf_{uid}", help="Open PDF"):
+            if st.button("Open", key=f"{key_ns}_open_pdf_{uid}", help="Open PDF", disabled=(not has_pdf)):
+                if refs_open_key:
+                    st.session_state[refs_open_key] = True
                 ok, msg = _open_pdf(pdf_path)
                 if not ok:
                     st.warning(msg)
 
         with cols[1]:
-            disabled_page = (page is None)
+            disabled_page = (page is None) or (not has_pdf)
             if st.button("Page", key=f"{key_ns}_open_page_{uid}", disabled=disabled_page,
                          help=f"Go to page {page}" if page else "Page unknown"):
+                if refs_open_key:
+                    st.session_state[refs_open_key] = True
                 ok, msg = _open_pdf_at(pdf_path, page=page)
                 if not ok:
                     st.warning(msg)
@@ -414,12 +558,14 @@ def _render_refs(
                 key=f"{key_ns}_cite_btn_{uid}",
                 help="Fetch citation (Auto-fetch from Crossref)",
                 on_click=_on_cite_click,
-                args=(cite_key, net_key, source_path)
+                args=(cite_key, net_key, source_path, refs_open_key)
             )
 
         # Render Citation UI (if open)
         if st.session_state.get(cite_key, False):
             _render_citation_ui(uid, source_path, key_ns)
+        elif not has_pdf:
+            st.caption("未定位到对应 PDF（可继续使用 Cite）。")
 
         st.markdown("<div class='ref-item-gap'></div>", unsafe_allow_html=True)
 

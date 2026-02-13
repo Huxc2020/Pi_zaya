@@ -26,7 +26,20 @@ from kb.llm import DeepSeekChat
 from kb import runtime_state as RUNTIME
 from kb.pdf_tools import PdfMetaSuggestion, build_base_name, ensure_dir, extract_pdf_meta_suggestion, open_in_explorer
 from kb.prefs import load_prefs, save_prefs
-from kb.file_ops import _cleanup_tmp_uploads, _list_pdf_paths_fast, _next_pdf_dest_path, _persist_upload_pdf, _pick_directory_dialog, _resolve_md_output_paths, _write_tmp_upload
+from kb.file_ops import (
+    _cleanup_tmp_md_artifacts,
+    _cleanup_tmp_uploads,
+    _find_md_main_name_mismatches,
+    _list_orphan_md_dirs,
+    _list_pdf_paths_fast,
+    _next_pdf_dest_path,
+    _persist_upload_pdf,
+    _pick_directory_dialog,
+    _resolve_md_output_paths,
+    _stash_orphan_md_dirs,
+    _sync_md_main_filenames,
+    _write_tmp_upload,
+)
 from kb.rename_manager import ensure_state_defaults as ensure_rename_manager_state
 from kb.rename_manager import render_panel as render_rename_manager_panel
 from kb.rename_manager import render_prompt as render_rename_prompt
@@ -397,6 +410,7 @@ def _page_chat(
                         prompt=prompt_hist,
                         show_heading=False,
                         key_ns=f"hist_{conv_id}_{user_msg_id}",
+                        refs_open_key=open_key_hist,
                         settings=settings,
                     )
                 elif pending:
@@ -584,6 +598,122 @@ def _page_chat(
     else:
         st.session_state.pop("_gen_poll_state", None)
 
+
+def _dir_signature(path_obj: Path) -> str:
+    try:
+        return str(Path(path_obj).expanduser().resolve())
+    except Exception:
+        return str(path_obj)
+
+
+def _maybe_auto_cleanup_tmp_artifacts(pdf_dir: Path, md_out_root: Path, *, interval_s: float = 45.0) -> dict[str, int]:
+    dir_sig = f"{_dir_signature(pdf_dir)}|{_dir_signature(md_out_root)}"
+    state = st.session_state.setdefault("_tmp_cleanup_state", {})
+    if not isinstance(state, dict):
+        state = {}
+
+    now = time.time()
+    rec = state.get(dir_sig) if isinstance(state.get(dir_sig), dict) else {}
+    last_ts = float(rec.get("ts", 0.0) or 0.0)
+    if (now - last_ts) < float(interval_s):
+        return {"pdf": 0, "md": 0}
+
+    cleaned_pdf = int(_cleanup_tmp_uploads(pdf_dir) or 0)
+    try:
+        cleaned_md, _ = _cleanup_tmp_md_artifacts(md_out_root)
+        cleaned_md = int(cleaned_md or 0)
+    except Exception:
+        cleaned_md = 0
+    state[dir_sig] = {"ts": now, "cleaned_pdf": cleaned_pdf, "cleaned_md": cleaned_md}
+    st.session_state["_tmp_cleanup_state"] = state
+    return {"pdf": cleaned_pdf, "md": cleaned_md}
+
+
+def _has_markdown_newer_than(md_out_root: Path, *, docs_mtime=None) -> bool:
+    if not Path(md_out_root).exists():
+        return False
+
+    skip_dirs = {"temp", "__pycache__", ".git"}
+    for root, dirs, files in os.walk(md_out_root):
+        dirs[:] = [d for d in dirs if str(d).lower() not in skip_dirs]
+        for name in files:
+            lower = str(name).lower()
+            if (not lower.endswith(".md")) or (lower == "assets_manifest.md"):
+                continue
+            if docs_mtime is None:
+                return True
+            p = Path(root) / name
+            try:
+                if float(p.stat().st_mtime) > float(docs_mtime) + 1e-6:
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def _kb_reindex_hint(md_out_root: Path, db_dir: Path, pdf_dir: Path) -> tuple[bool, str]:
+    force_dirty = bool(st.session_state.get("kb_reindex_pending"))
+    sig = (
+        f"{_dir_signature(md_out_root)}|{_dir_signature(db_dir)}|{_dir_signature(pdf_dir)}|dirty:{int(force_dirty)}"
+    )
+    now = time.time()
+
+    cache = st.session_state.get("_kb_reindex_hint_cache")
+    if isinstance(cache, dict):
+        if str(cache.get("sig") or "") == sig:
+            cache_ts = float(cache.get("ts", 0.0) or 0.0)
+            if (now - cache_ts) < 8.0:
+                return bool(cache.get("need")), str(cache.get("reason") or "")
+
+    need = False
+    reason = ""
+    if force_dirty:
+        need = True
+        reason = "检测到重命名变更，需更新知识库。"
+    else:
+        reasons: list[str] = []
+        try:
+            orphan_dirs = _list_orphan_md_dirs(md_out_root, pdf_dir)
+        except Exception:
+            orphan_dirs = []
+        if orphan_dirs:
+            need = True
+            reasons.append(f"检测到 {len(orphan_dirs)} 个旧 MD 目录与当前 PDF 不匹配")
+
+        try:
+            bad_main = _find_md_main_name_mismatches(md_out_root, pdf_dir)
+        except Exception:
+            bad_main = []
+        if bad_main:
+            need = True
+            reasons.append(f"检测到 {len(bad_main)} 个 MD 主文件名未与 PDF 同步")
+
+        if need:
+            reason = "；".join(reasons) + "，建议更新知识库。"
+            st.session_state["_kb_reindex_hint_cache"] = {"sig": sig, "ts": now, "need": need, "reason": reason}
+            return need, reason
+
+        docs_json = Path(db_dir) / "docs.json"
+        try:
+            docs_mtime = docs_json.stat().st_mtime if docs_json.exists() else None
+        except Exception:
+            docs_mtime = None
+
+        try:
+            need = _has_markdown_newer_than(md_out_root, docs_mtime=docs_mtime)
+        except Exception:
+            need = False
+
+        if need:
+            if docs_mtime is None:
+                reason = "检测到 Markdown 文档，尚未建立知识库索引。"
+            else:
+                reason = "检测到新增或修改的 Markdown，建议更新知识库。"
+
+    st.session_state["_kb_reindex_hint_cache"] = {"sig": sig, "ts": now, "need": need, "reason": reason}
+    return need, reason
+
+
 def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: Path, prefs: dict, retriever_reload_flag: dict) -> None:
     _bg_ensure_started()
 
@@ -682,6 +812,10 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
 
     ensure_dir(pdf_dir)
     ensure_dir(md_out_root)
+    auto_cleaned = _maybe_auto_cleanup_tmp_artifacts(pdf_dir, md_out_root)
+    if int(auto_cleaned.get("md", 0) or 0) > 0:
+        st.session_state["kb_reindex_pending"] = True
+        st.session_state.pop("_kb_reindex_hint_cache", None)
 
     # List PDFs early (used by the rename manager + listing below).
     # Keep it fast: avoid stat() for sorting here.
@@ -700,36 +834,64 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
             unsafe_allow_html=True,
         )
 
-    try:
-        dir_sig = str(Path(pdf_dir).expanduser().resolve())
-    except Exception:
-        dir_sig = str(pdf_dir)
+    dir_sig = _dir_signature(pdf_dir)
     dismissed = st.session_state.setdefault("rename_prompt_dismissed_dirs", set())
     render_rename_prompt(pdfs=pdfs, dir_sig=dir_sig, dismissed_dirs=dismissed)
 
+    need_reindex, reindex_reason = _kb_reindex_hint(md_out_root, db_dir, pdf_dir)
+
     st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
-    cols = st.columns([1, 1, 1, 1])
+    cols = st.columns([1.0, 1.25, 1.1, 6.65])
     with cols[0]:
         if st.button(S["open_dir"], key="open_pdf_dir"):
             open_in_explorer(pdf_dir)
     with cols[1]:
-        if st.button(S["reindex_now"], key="reindex_btn"):
+        do_reindex = need_reindex and st.button(S["reindex_now"], key="reindex_btn")
+        if do_reindex:
             ingest_py = Path(__file__).resolve().parent / "ingest.py"
             if ingest_py.exists():
-                subprocess.run(
-                    [os.sys.executable, str(ingest_py), "--src", str(md_out_root), "--db", str(db_dir), "--incremental", "--prune"],
-                    check=False,
-                )
-            st.info(S["run_ok"])
-            retriever_reload_flag["reload"] = True
+                with st.spinner("正在更新知识库..."):
+                    sync_n, sync_msgs = _sync_md_main_filenames(md_out_root, pdf_dir)
+                    moved_n, moved_dirs = _stash_orphan_md_dirs(md_out_root, pdf_dir)
+                    proc = subprocess.run(
+                        [os.sys.executable, str(ingest_py), "--src", str(md_out_root), "--db", str(db_dir), "--incremental", "--prune"],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                if int(proc.returncode or 0) == 0:
+                    if sync_n > 0:
+                        preview_sync = ", ".join(sync_msgs[:2])
+                        suffix_sync = "..." if sync_n > 2 else ""
+                        st.info(f"已同步 {sync_n} 个 MD 主文件名：{preview_sync}{suffix_sync}")
+                    if moved_n > 0:
+                        preview = ", ".join(moved_dirs[:3])
+                        suffix = "..." if moved_n > 3 else ""
+                        st.info(f"已归档 {moved_n} 个旧 MD 目录：{preview}{suffix}")
+                    st.success(S["run_ok"])
+                    st.session_state["kb_reindex_pending"] = False
+                    st.session_state.pop("_kb_reindex_hint_cache", None)
+                    retriever_reload_flag["reload"] = True
+                else:
+                    err = (proc.stderr or proc.stdout or "").strip()
+                    first_line = err.splitlines()[0] if err else "ingest.py 执行失败"
+                    st.error(f"更新失败：{first_line}")
+            else:
+                st.error("未找到 ingest.py，无法更新知识库。")
     with cols[2]:
-        if st.button(S["cleanup"], key="cleanup_btn"):
-            n = _cleanup_tmp_uploads(pdf_dir)
-            st.info(f"{S['run_ok']}: cleaned {n} tmp uploads")
-    with cols[3]:
         if st.button("文件名管理", key="rename_mgr_btn", help="根据 PDF 内容识别「期刊-年份-标题」并建议重命名"):
             st.session_state["rename_mgr_open"] = True
             st.session_state["rename_scan_trigger"] = False
+    with cols[3]:
+        hints: list[str] = []
+        cleaned_pdf = int(auto_cleaned.get("pdf", 0) or 0)
+        cleaned_md = int(auto_cleaned.get("md", 0) or 0)
+        if (cleaned_pdf + cleaned_md) > 0:
+            hints.append(f"已自动清理临时文件 PDF:{cleaned_pdf} MD:{cleaned_md}")
+        if need_reindex and reindex_reason:
+            hints.append(reindex_reason)
+        if hints:
+            st.caption(" | ".join(hints))
 
     ensure_rename_manager_state()
     render_rename_manager_panel(
@@ -1344,7 +1506,16 @@ def main() -> None:
     docs_json = db_dir / "docs.json"
     cur_mtime = docs_json.stat().st_mtime if docs_json.exists() else None
     prev_mtime = st.session_state.get("db_mtime")
-    need_reload = ("retriever" not in st.session_state) or bool(reload_btn) or (cur_mtime and prev_mtime and cur_mtime > prev_mtime + 1e-6)
+    mtime_changed = bool(
+        (cur_mtime is not None)
+        and ((prev_mtime is None) or (float(cur_mtime) > float(prev_mtime) + 1e-6))
+    )
+    need_reload = (
+        ("retriever" not in st.session_state)
+        or bool(reload_btn)
+        or bool(retriever_reload_flag.get("reload"))
+        or mtime_changed
+    )
     if need_reload:
         with st.spinner("\u52a0\u8f7d\u77e5\u8bc6\u5e93..."):
             st.session_state.pop("retriever_load_error", None)
@@ -1355,6 +1526,7 @@ def main() -> None:
                 st.session_state["retriever"] = BM25Retriever([])
                 st.session_state["retriever_load_error"] = f"{type(e).__name__}: {e}"
             st.session_state["db_mtime"] = cur_mtime or time.time()
+            retriever_reload_flag["reload"] = False
 
     if clear_btn:
         st.session_state["conv_id"] = chat_store.create_conversation()

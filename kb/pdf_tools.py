@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+import json
 import html as html_lib
 from dataclasses import dataclass
 import hashlib
@@ -25,7 +26,8 @@ class PdfMetaSuggestion:
 
 
 # Keep abbreviations explicit and deterministic (avoid LLM guessing for filenames).
-_VENUE_ABBR_MAP: dict[str, str] = {
+# This built-in map acts as a safe fallback when the external json is missing/invalid.
+_DEFAULT_VENUE_ABBR_MAP: dict[str, str] = {
     # Optics / photonics
     "laser photonics reviews": "LPR",
     "light science applications": "LSA",
@@ -130,11 +132,12 @@ _VENUE_ABBR_MAP: dict[str, str] = {
     "siggraph": "SIGGRAPH",
     "arxiv": "arXiv",
 }
+_VENUE_ABBR_JSON_PATH = Path(__file__).resolve().with_name("venue_abbr_map.json")
 
 
 # Bump this whenever the PDF meta extraction heuristics change in a way that should
 # invalidate any UI/session caches that store extracted metadata.
-PDF_META_EXTRACT_VERSION = "2026-02-13.3"
+PDF_META_EXTRACT_VERSION = "2026-02-13.5"
 
 
 def ensure_dir(p: Path) -> None:
@@ -158,6 +161,32 @@ def _venue_key(venue: str) -> str:
     v = re.sub(r"[^a-z0-9]+", " ", v)
     v = re.sub(r"\s+", " ", v).strip()
     return v
+
+
+def _normalize_venue_abbr_map(raw_map: dict[str, str]) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for k, v in (raw_map or {}).items():
+        key = _venue_key(str(k))
+        val = _sanitize_component(str(v))
+        if key and val:
+            normalized[key] = val
+    return normalized
+
+
+def _load_venue_abbr_map() -> dict[str, str]:
+    merged = _normalize_venue_abbr_map(_DEFAULT_VENUE_ABBR_MAP)
+    try:
+        if _VENUE_ABBR_JSON_PATH.exists():
+            data = json.loads(_VENUE_ABBR_JSON_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                merged.update(_normalize_venue_abbr_map(data))
+    except Exception:
+        # Keep runtime stable if the json config is malformed.
+        pass
+    return merged
+
+
+_VENUE_ABBR_MAP = _load_venue_abbr_map()
 
 
 def abbreviate_venue(venue: str) -> str:
@@ -685,8 +714,6 @@ def extract_pdf_meta_suggestion(pdf_path: Path, *, settings: Any | None = None) 
 
     year = _guess_year(top_text) or _guess_year(first_text)
     venue = _guess_venue(top_text) or _guess_venue(first_text)
-    if (not year) and file_year:
-        year = file_year
     if (not venue or _is_generic_venue(venue)) and file_venue and (not _is_generic_venue(file_venue)):
         venue = file_venue
     if (not title) and file_title:
@@ -777,16 +804,22 @@ def extract_pdf_meta_suggestion(pdf_path: Path, *, settings: Any | None = None) 
         if c_trusted:
             if c_year and re.fullmatch(r"(19\d{2}|20\d{2})", c_year):
                 year = c_year
+            else:
+                year = ""
             if c_venue:
                 venue = c_venue
+        else:
+            # For filename suggestions, prefer empty year over a potentially wrong year.
+            year = ""
+    else:
+        # User preference: if Crossref cannot be confirmed, keep year empty.
+        year = ""
 
     # Safety fallback: avoid generic top-level journal names when untrusted.
     if _is_generic_venue(venue) and (not cross_trusted):
         venue = ""
     if (not venue) and file_venue and (not _is_generic_venue(file_venue)):
         venue = file_venue
-    if (not year) and file_year:
-        year = file_year
     if (not title) and file_title:
         title = file_title
 

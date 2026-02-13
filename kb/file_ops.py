@@ -2,10 +2,34 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog
 from typing import Optional
+
+
+def _is_ignored_md_dir_name(name: str) -> bool:
+    n = (name or "").strip().lower()
+    if n in {"chunks", "temp", "__pycache__", ".git"}:
+        return True
+    if n.startswith("__upload__"):
+        return True
+    if n.startswith("_tmp_") or n.startswith("tmp_"):
+        return True
+    return False
+
+
+def _would_hit_windows_path_limit(path_obj: Path, *, safe_limit: int = 245) -> bool:
+    """
+    Conservative check for legacy Windows MAX_PATH environments.
+    Even if long-path support is enabled, using a safe cap avoids flaky renames.
+    """
+    try:
+        return (os.name == "nt") and (len(str(path_obj)) >= int(safe_limit))
+    except Exception:
+        return False
 
 def _resolve_md_output_paths(out_root: Path, pdf_path: Path) -> tuple[Path, Path, bool]:
     pdf = Path(pdf_path)
@@ -79,6 +103,161 @@ def _cleanup_tmp_uploads(pdf_dir: Path) -> int:
     except Exception:
         pass
     return n
+
+
+def _cleanup_tmp_md_artifacts(md_out_root: Path) -> tuple[int, list[str]]:
+    """
+    Remove temporary markdown artifacts produced during upload/probing.
+    """
+    md_root = Path(md_out_root)
+    if (not md_root.exists()) or (not md_root.is_dir()):
+        return 0, []
+
+    removed: list[str] = []
+    try:
+        for p in md_root.iterdir():
+            name = p.name
+            low = name.lower()
+            is_tmp = low.startswith("__upload__") or low.startswith("_tmp_") or low.startswith("tmp_")
+            if not is_tmp:
+                continue
+            try:
+                if p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    p.unlink(missing_ok=True)  # type: ignore[call-arg]
+                removed.append(name)
+            except Exception:
+                continue
+    except Exception:
+        return len(removed), removed
+    return len(removed), removed
+
+
+def _list_orphan_md_dirs(md_out_root: Path, pdf_dir: Path) -> list[Path]:
+    """
+    Find generated markdown folders that no longer have a matching PDF stem.
+    We only consider directories that look like app-generated conversion output:
+    <folder>/<folder>.en.md exists.
+    """
+    md_root = Path(md_out_root)
+    pdf_root = Path(pdf_dir)
+    if (not md_root.exists()) or (not md_root.is_dir()) or (not pdf_root.exists()):
+        return []
+
+    try:
+        pdf_stems = {p.stem.strip().lower() for p in pdf_root.glob("*.pdf") if p.is_file()}
+    except Exception:
+        pdf_stems = set()
+    if not pdf_stems:
+        return []
+
+    out: list[Path] = []
+    try:
+        for d in md_root.iterdir():
+            if (not d.is_dir()) or _is_ignored_md_dir_name(d.name):
+                continue
+            if d.name.strip().lower() in pdf_stems:
+                continue
+
+            main_md = d / f"{d.name}.en.md"
+            if not main_md.exists():
+                continue
+            out.append(d)
+    except Exception:
+        return out
+    return out
+
+
+def _stash_orphan_md_dirs(md_out_root: Path, pdf_dir: Path) -> tuple[int, list[str]]:
+    """
+    Move orphan markdown folders to temp stash instead of deleting.
+    The ingest script excludes `temp/` by default, so these files are ignored safely.
+    """
+    orphans = _list_orphan_md_dirs(md_out_root, pdf_dir)
+    if not orphans:
+        return 0, []
+
+    md_root = Path(md_out_root)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    stash_root = md_root / "temp" / "_orphan_md_stash" / stamp
+    stash_root.mkdir(parents=True, exist_ok=True)
+
+    moved: list[str] = []
+    for d in orphans:
+        try:
+            dest = stash_root / d.name
+            if dest.exists():
+                k = 2
+                while (stash_root / f"{d.name}-{k}").exists() and k < 999:
+                    k += 1
+                dest = stash_root / f"{d.name}-{k}"
+            shutil.move(str(d), str(dest))
+            moved.append(d.name)
+        except Exception:
+            continue
+    return len(moved), moved
+
+
+def _find_md_main_name_mismatches(md_out_root: Path, pdf_dir: Path) -> list[tuple[Path, Path]]:
+    """
+    Detect folders whose canonical main markdown `<stem>.en.md` is missing,
+    but another markdown file exists and can be renamed to canonical name.
+    """
+    md_root = Path(md_out_root)
+    pdf_root = Path(pdf_dir)
+    if (not md_root.exists()) or (not pdf_root.exists()):
+        return []
+
+    out: list[tuple[Path, Path]] = []
+    try:
+        for p in pdf_root.glob("*.pdf"):
+            if not p.is_file():
+                continue
+            folder = md_root / p.stem
+            if (not folder.exists()) or (not folder.is_dir()):
+                continue
+            canonical = folder / f"{p.stem}.en.md"
+            if canonical.exists():
+                continue
+            if _would_hit_windows_path_limit(canonical):
+                # Keep current file when canonical path is too long for reliable rename.
+                continue
+
+            candidates = [
+                x
+                for x in sorted(folder.glob("*.md"))
+                if x.is_file() and x.name.lower() != "assets_manifest.md" and x.name != canonical.name
+            ]
+            if not candidates:
+                continue
+
+            preferred = [x for x in candidates if x.name.lower().endswith(".en.md")]
+            src = preferred[0] if preferred else candidates[0]
+            out.append((src, canonical))
+    except Exception:
+        return out
+    return out
+
+
+def _sync_md_main_filenames(md_out_root: Path, pdf_dir: Path) -> tuple[int, list[str]]:
+    """
+    Rename markdown main files to canonical `<pdf_stem>.en.md` inside matched folders.
+    """
+    pairs = _find_md_main_name_mismatches(md_out_root, pdf_dir)
+    if not pairs:
+        return 0, []
+
+    renamed: list[str] = []
+    for src, dest in pairs:
+        try:
+            if dest.exists():
+                continue
+            src.rename(dest)
+            renamed.append(f"{src.parent.name}: {src.name} -> {dest.name}")
+        except Exception:
+            continue
+    return len(renamed), renamed
 
 def _list_pdf_paths_fast(pdf_dir: Path) -> list[Path]:
     """
