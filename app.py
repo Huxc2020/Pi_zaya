@@ -96,6 +96,10 @@ if not hasattr(RUNTIME, "GEN_LOCK"):
     RUNTIME.GEN_LOCK = threading.Lock()
 if not hasattr(RUNTIME, "GEN_TASKS"):
     RUNTIME.GEN_TASKS = {}
+if not hasattr(RUNTIME, "CITATION_LOCK"):
+    RUNTIME.CITATION_LOCK = threading.Lock()
+if not hasattr(RUNTIME, "CITATION_TASKS"):
+    RUNTIME.CITATION_TASKS = {}
 
 
 # Keep source ASCII-stable: use unicode escapes for UI strings to avoid Windows encoding issues.

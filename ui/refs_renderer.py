@@ -5,6 +5,7 @@ import html
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -410,11 +411,44 @@ def _parse_filename_meta(path_str: str) -> tuple[str, str, str]:
 
 
 # --- Callback Function (THE FIX) ---
+# --- Async Citation Worker ---
+
+def _bg_citation_worker(task_id: str, net_key: str, source_path: str, venue_hint: str, year_hint: str):
+    from kb import runtime_state as RUNTIME
+    
+    # 1. Infer title
+    l_title_hint = os.path.basename(source_path)
+    try:
+        if l_title_hint.lower().endswith(".pdf"):
+            l_title_hint = l_title_hint[:-4]
+        search_title = _infer_title_from_source_text(source_path, l_title_hint)
+    except Exception:
+        search_title = l_title_hint
+
+    # 2. Fetch (Blocking I/O)
+    found = fetch_crossref_meta(
+        search_title,
+        source_path=source_path,
+        expected_venue=venue_hint,
+        expected_year=year_hint,
+    )
+
+    # 3. Update State
+    with RUNTIME.CITATION_LOCK:
+        tasks = RUNTIME.CITATION_TASKS
+        if task_id in tasks:
+            t = tasks[task_id]
+            t["done"] = True
+            t["result"] = found
+            # Also update session_state copy if possible? 
+            # No, stream lit session state is thread-local usually. 
+            # We rely on the UI poll to pick it up from RUNTIME.CITATION_TASKS.
+
+
+# --- Callback Function (Async) ---
 def _on_cite_click(cite_key: str, net_key: str, source_path: str, refs_open_key: str = ""):
     """
-    This runs BEFORE the UI re-renders.
-    It fetches data immediately, updates session_state,
-    so the UI just wakes up with the data ready.
+    Triggers background fetch if data missing, returns immediately.
     """
     if refs_open_key:
         st.session_state[refs_open_key] = True
@@ -423,27 +457,42 @@ def _on_cite_click(cite_key: str, net_key: str, source_path: str, refs_open_key:
     new_state = not st.session_state.get(cite_key, False)
     st.session_state[cite_key] = new_state
 
-    # 2. If opening, fetch data if missing
+    # 2. If opening, start background task if needed
     if new_state:
-        if net_key not in st.session_state:
-            # Infer title
-            l_venue, l_year, l_title = _parse_filename_meta(source_path)
-            search_title = l_title if l_title else Path(source_path).stem
-            search_title = _infer_title_from_source_text(source_path, search_title)
+        # Check if we already have data
+        if st.session_state.get(net_key):
+            return
+        if st.session_state.get(f"{net_key}_failed"):
+            return
 
-            # Fetch (This will block for ~1-2s, user feels a slight wait)
-            found = fetch_crossref_meta(
-                search_title,
-                source_path=source_path,
-                expected_venue=l_venue,
-                expected_year=l_year,
-            )
-            if found:
-                st.session_state[net_key] = found
-                st.session_state.pop(f"{net_key}_failed", None)
-            else:
-                st.session_state.pop(net_key, None)
-                st.session_state[f"{net_key}_failed"] = True
+        from kb import runtime_state as RUNTIME
+        import threading
+        import uuid
+
+        # Check if task already running
+        task_id = f"cite_task_{net_key}"
+        with RUNTIME.CITATION_LOCK:
+            if task_id in RUNTIME.CITATION_TASKS:
+                return # Already running
+            
+            # Start new task
+            RUNTIME.CITATION_TASKS[task_id] = {
+                "created_at": time.time(),
+                "done": False,
+                "result": None,
+                "net_key": net_key,
+            }
+
+        # Prepare hints
+        l_venue, l_year, _ = _parse_filename_meta(source_path)
+        
+        # Fire thread
+        t = threading.Thread(
+            target=_bg_citation_worker,
+            args=(task_id, net_key, source_path, l_venue, l_year),
+            daemon=True
+        )
+        t.start()
 
 
 def _render_refs(
@@ -574,6 +623,46 @@ def _render_citation_ui(uid: str, source_path: str, key_ns: str) -> None:
     net_key = f"{key_ns}_net_meta_v5_{uid}"
     net_data = st.session_state.get(net_key)
     fetch_failed = bool(st.session_state.get(f"{net_key}_failed", False))
+
+    # Async Check
+    if (not net_data) and (not fetch_failed):
+        from kb import runtime_state as RUNTIME
+        task_id = f"cite_task_{net_key}"
+        with RUNTIME.CITATION_LOCK:
+            task = RUNTIME.CITATION_TASKS.get(task_id)
+        
+        if task:
+            if task.get("done"):
+                # Task finished, sync to session
+                res = task.get("result")
+                if res:
+                    st.session_state[net_key] = res
+                    net_data = res
+                else:
+                    st.session_state[f"{net_key}_failed"] = True
+                    fetch_failed = True
+                
+                # Cleanup task (optional, or keep generic cleaner)
+                # with RUNTIME.CITATION_LOCK:
+                #    RUNTIME.CITATION_TASKS.pop(task_id, None)
+                st.experimental_rerun()
+            else:
+                # Still running
+                with st.container():
+                     st.markdown(
+                        "<div style='background:rgba(128,128,128,0.06); padding:10px; border-radius:8px; margin-top:5px; margin-bottom:10px; border:1px solid rgba(128,128,128,0.15);'>"
+                        "<div style='margin-bottom:8px; font-weight:600; font-size:0.9em; color:#666;'>Citation Export</div>"
+                        "<div style='font-size:0.9em; color:#666;'>正在联网检索元数据 (Crossref)...</div>"
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
+                     # Poll again shortly
+                     time.sleep(0.5) 
+                     st.experimental_rerun()
+                return
+        else:
+             # Should not happen if button clicked, but safety fallback
+             pass
 
     if not isinstance(net_data, dict):
         with st.container():
