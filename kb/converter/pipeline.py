@@ -14,10 +14,10 @@ try:
 except ImportError:
     fitz = None
 
-from .config import ConverterConfig
+from .config import ConvertConfig
 from .models import TextBlock
 from .geometry_utils import _rect_area, _union_rect
-from .text_utils import _normalize_text, _common_prefix_length
+from .text_utils import _normalize_text
 from .layout_analysis import (
     detect_body_font_size,
     build_repeated_noise_texts,
@@ -33,7 +33,7 @@ from .post_processing import postprocess_markdown
 
 
 class PDFConverter:
-    def __init__(self, cfg: ConverterConfig):
+    def __init__(self, cfg: ConvertConfig):
         self.cfg = cfg
         self.llm_worker = LLMWorker(cfg)
         self.noise_texts: Set[str] = set()
