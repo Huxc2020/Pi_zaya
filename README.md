@@ -145,6 +145,18 @@ $env:KB_STREAMLIT_PORT="8501"
 
 ---
 
+## 5)在项目根目录下，使用以下命令运行所有测试：
+
+```powershell
+pytest tests/
+```
+或者运行特定模块：
+
+```powershell
+pytest tests/unit/test_chunking.py
+```
+建议在每次每次修改核心逻辑与代码提交前运行 pytest，同时计划为新功能模块配套对应的测试文件。
+
 ## 常见问题
 
 ### 1) 报错 401 / key 无效
