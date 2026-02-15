@@ -1,7 +1,8 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -4638,6 +4639,92 @@ TEXT:
         self._save_cached_repair(cache, kind="math", raw=raw, output=out)
         return out
 
+    def _call_llm_repair_math_from_image(
+        self,
+        png_bytes: bytes,
+        *,
+        page_number: int,
+        block_index: int,
+        eq_number: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Vision-based math recovery: screenshot the equation region and ask a VL model for LaTeX.
+        Works only when the backend supports image_url inputs.
+        """
+        if not self.cfg.llm or not self._client or not self.cfg.llm_repair:
+            return None
+        if not png_bytes:
+            return None
+        try:
+            import hashlib
+
+            h = hashlib.sha1(png_bytes).hexdigest()[:16]
+            cache = self._repairs_dir / f"mathv_p{int(page_number):03d}_b{int(block_index):03d}_{h}.json"
+            cached = self._load_cached_repair(cache)
+            if cached:
+                return cached
+        except Exception:
+            cache = None
+
+        b64 = base64.b64encode(png_bytes).decode("ascii")
+        data_url = "data:image/png;base64," + b64
+        eq_hint = f"(Equation number: {eq_number})" if eq_number else ""
+        prompt = (
+            f"Recover the LaTeX for this equation image from a research paper PDF page {page_number} {eq_hint}.\n"
+            "Return ONLY the LaTeX for the equation body.\n"
+            "- No $/$$ delimiters\n"
+            "- No \\begin{equation}/align environments\n"
+            "- No explanations\n"
+            "Be exact and faithful to the image.\n"
+        )
+        llm = self.cfg.llm
+        if llm.request_sleep_s > 0:
+            time.sleep(llm.request_sleep_s)
+        try:
+            resp = self._llm_create(
+                messages=[
+                    {"role": "system", "content": "You are a LaTeX math expert. Return only LaTeX."},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                        ],
+                    },
+                ],
+                temperature=0.0,
+                max_tokens=min(getattr(llm, "max_tokens", 2048) or 2048, 900),
+            )
+        except Exception as e:
+            try:
+                debug_vision = bool(int(os.environ.get("KB_PDF_DEBUG_VISION_MATH", "0") or "0")) or bool(
+                    getattr(self.cfg, "keep_debug", False)
+                )
+            except Exception:
+                debug_vision = False
+            if debug_vision:
+                try:
+                    mname = str(getattr(self.cfg.llm, "model", "") or "")
+                except Exception:
+                    mname = ""
+                _progress_log(f"VISION_MATH_CALL_FAILED page={page_number} block={block_index} model={mname!r} err={e}")
+            return None
+        out = (resp.choices[0].message.content or "").strip()
+        if out.startswith("```"):
+            m = re.search(r"```(?:\\w+)?\\n(.*?)```", out, flags=re.S)
+            if m:
+                out = (m.group(1) or "").strip()
+        if out.startswith("$$") and out.endswith("$$"):
+            out = out[2:-2].strip()
+        if re.search(r"\\begin\\{equation\\}|\\begin\\{align\\}", out):
+            return None
+        if cache and out:
+            try:
+                self._save_cached_repair(cache, kind="mathv", raw=f"<image:{len(png_bytes)} bytes>", output=out)
+            except Exception:
+                pass
+        return out or None
+
     def _call_llm_polish_code(self, raw: str, *, page_number: int, block_index: int) -> Optional[str]:
         if not self.cfg.llm or not self._client or not self.cfg.llm_repair:
             return None
@@ -5055,6 +5142,7 @@ TEXT:
         blocks: list[TextBlock],
         figs_by_block: dict[int, str],
         *,
+        page=None,
         page_number: int,
         eqno_by_block: Optional[dict[int, str]] = None,
         eqimg_by_block: Optional[dict[int, str]] = None,
@@ -5067,6 +5155,80 @@ TEXT:
             page_number=page_number,
             eqno_by_block=eqno_by_block,
         )
+
+        def _vision_math_enabled() -> bool:
+            try:
+                if (not self.cfg.llm) or (not self._client) or (not self.cfg.llm_repair):
+                    return False
+                if page is None:
+                    return False
+                raw = str(os.environ.get("KB_PDF_LLM_VISION_MATH", "") or "").strip().lower()
+                if raw:
+                    return raw in {"1", "true", "yes", "y", "on"}
+                m = str(getattr(self.cfg.llm, "model", "") or "").strip().lower()
+                return ("vl" in m) or ("vision" in m)
+            except Exception:
+                return False
+
+        def _debug_vision_math() -> bool:
+            try:
+                return bool(int(os.environ.get("KB_PDF_DEBUG_VISION_MATH", "0") or "0")) or bool(
+                    getattr(self.cfg, "keep_debug", False)
+                )
+            except Exception:
+                return False
+
+        def _looks_like_broken_display_math(raw_math: str, latex: str) -> bool:
+            rm = (raw_math or "").strip()
+            lt = (latex or "").strip()
+            if not rm or not lt:
+                return False
+            if ("=" in rm) and ("=" not in lt):
+                return True
+            if len(rm) >= 60 and len(lt) <= max(24, int(len(rm) * 0.45)):
+                return True
+            if any(x in rm for x in ["∑", "Σ", "\\sum", "∫", "\\int", "||", "‖"]) and not any(
+                y in lt for y in ["\\sum", "\\int", "\\left\\|", "\\|", "\\lVert", "\\rVert"]
+            ):
+                return True
+            return False
+
+        def _screenshot_eq_png(bbox: tuple[float, float, float, float]) -> bytes:
+            if fitz is None or page is None:
+                return b""
+            try:
+                rect = fitz.Rect(bbox)
+            except Exception:
+                return b""
+            if rect.width <= 2 or rect.height <= 2:
+                return b""
+            # Pad more vertically to include equation number.
+            pad_x = max(2.0, float(rect.width) * 0.06)
+            pad_y = max(2.0, float(rect.height) * 0.22)
+            try:
+                crop = fitz.Rect(
+                    max(0.0, float(rect.x0) - pad_x),
+                    max(0.0, float(rect.y0) - pad_y),
+                    min(float(page.rect.width), float(rect.x1) + pad_x),
+                    min(float(page.rect.height), float(rect.y1) + pad_y),
+                )
+            except Exception:
+                crop = rect
+            try:
+                pix = _render_clip_pixmap(
+                    page,
+                    crop,
+                    base_scale=float(getattr(self.cfg, "image_scale", 2.2) or 2.2),
+                    image_alpha=bool(getattr(self.cfg, "image_alpha", False)),
+                    min_scale=1.8,
+                    max_scale=5.2,
+                    min_long_edge_px=1600,
+                    min_short_edge_px=520,
+                    image_regions=None,
+                )
+                return pix.tobytes("png")
+            except Exception:
+                return b""
 
         def _ctx_before(i: int) -> str:
             for pj in range(i - 1, -1, -1):
@@ -5237,6 +5399,57 @@ TEXT:
                 if not latex and raw_math and _is_balanced_latex(raw_math) and re.search(r"\\[A-Za-z]+", raw_math):
                     latex = raw_math
                 latex_norm = _normalize_display_latex(latex if latex is not None else raw_math, eq_number=eqno)
+
+                # VL vision retry for display-like equations when text LaTeX is missing or looks broken.
+                if _vision_math_enabled():
+                    try:
+                        ms = (raw_math or "").strip()
+                        sym_n = len(re.findall(r"[=+\\-*/^_{}\\\\\\[\\]]|[∈≤≥≈×·Σ∑∫∞→←⇔⇒]", ms))
+                        complex_tok = bool(
+                            re.search(r"[∑Σ∫∞≤≥≈≠→←⇔⇒√]|\\\\(?:frac|sqrt|sum|int|prod|log|exp|left|right|begin)\\b", ms)
+                        )
+                        is_wide = False
+                        try:
+                            rr = fitz.Rect(b.bbox)
+                            is_wide = float(rr.width) >= float(page.rect.width) * 0.55
+                        except Exception:
+                            is_wide = False
+                        displayish = (
+                            ("\n" in ms)
+                            or ("=" in ms)
+                            or (len(ms) >= 60)
+                            or complex_tok
+                            or (sym_n >= 10 and len(ms) >= 25)
+                            or (is_wide and len(ms) >= 18)
+                        )
+                        should_try = displayish and ((not latex_norm) or _looks_like_broken_display_math(ms, latex_norm or ""))
+                        if _debug_vision_math() and not should_try:
+                            why = []
+                            if not displayish:
+                                why.append(f"not_displayish(sym_n={sym_n},wide={int(is_wide)},len={len(ms)})")
+                            if latex_norm and (not _looks_like_broken_display_math(ms, latex_norm)):
+                                why.append("latex_not_suspicious")
+                            _progress_log(f"VISION_MATH_SKIP page={page_number} block={bi} reason={','.join(why) or 'unknown'}")
+
+                        if should_try:
+                            png = _screenshot_eq_png(b.bbox)
+                            if png:
+                                if _debug_vision_math():
+                                    _progress_log(f"VISION_MATH_CALL page={page_number} block={bi} src_len={len(ms)}")
+                                vlatex = self._call_llm_repair_math_from_image(
+                                    png,
+                                    page_number=page_number,
+                                    block_index=bi,
+                                    eq_number=eqno,
+                                )
+                                vnorm = _normalize_display_latex(vlatex or "", eq_number=eqno) if vlatex else None
+                                if vnorm:
+                                    _progress_log(f"VISION_MATH_OK page={page_number} block={bi} eq={eqno or ''}")
+                                    latex_norm = vnorm
+                    except Exception as e:
+                        if _debug_vision_math():
+                            _progress_log(f"VISION_MATH_ERROR page={page_number} block={bi} err={e}")
+
                 if latex_norm:
                     out.append("$$")
                     out.append(latex_norm)
@@ -5647,6 +5860,7 @@ INPUT JSON:
         en_md = self._render_blocks_to_markdown(
             blocks,
             figs,
+            page=page,
             page_number=pnum,
             eqno_by_block=eqno_by_block,
             eqimg_by_block=eq_imgs,
@@ -5961,6 +6175,7 @@ INPUT JSON:
             en_md = self._render_blocks_to_markdown(
                 blocks,
                 figs,
+                page=page,
                 page_number=pnum,
                 eqno_by_block=eqno_by_block,
                 eqimg_by_block=eq_imgs,
@@ -6283,12 +6498,23 @@ def _parse_args(argv: Optional[list[str]] = None) -> ConvertConfig:
     ap.add_argument("--skip-existing", action="store_true", help="Skip pages if temp outputs already exist")
     ap.add_argument("--keep-debug", action="store_true", help="Write per-page tagged + md into temp/")
 
-    # DeepSeek's OpenAI-compatible endpoint uses the /v1 prefix.
-    ap.add_argument("--base-url", default=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"))
-    ap.add_argument("--model", default=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"))
+    # OpenAI-compatible endpoints.
+    # If QWEN_API_KEY is set, default to Qwen's compatible-mode endpoint and a vision-capable model.
+    if os.environ.get("QWEN_API_KEY"):
+        default_base_url = os.environ.get("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+        default_model = os.environ.get("QWEN_MODEL", os.environ.get("OPENAI_MODEL", "qwen3-vl-plus"))
+        default_key_env = os.environ.get("QWEN_API_KEY_ENV", "QWEN_API_KEY")
+    else:
+        # DeepSeek's OpenAI-compatible endpoint uses the /v1 prefix.
+        default_base_url = os.environ.get("DEEPSEEK_BASE_URL", os.environ.get("OPENAI_BASE_URL", "https://api.deepseek.com/v1"))
+        default_model = os.environ.get("DEEPSEEK_MODEL", os.environ.get("OPENAI_MODEL", "deepseek-chat"))
+        default_key_env = os.environ.get("DEEPSEEK_API_KEY_ENV", "DEEPSEEK_API_KEY")
+
+    ap.add_argument("--base-url", default=default_base_url)
+    ap.add_argument("--model", default=default_model)
     ap.add_argument(
         "--api-key-env",
-        default="DEEPSEEK_API_KEY",
+        default=default_key_env,
         help="Env var name holding the API key (default: DEEPSEEK_API_KEY)",
     )
     ap.add_argument("--no-llm", action="store_true", help="Disable LLM (only tag->markdown conversion)")
@@ -6316,7 +6542,7 @@ def _parse_args(argv: Optional[list[str]] = None) -> ConvertConfig:
     )
     ap.add_argument("--classify-batch-size", type=int, default=40, help="LLM classify blocks batch size (higher=fewer calls)")
     ap.add_argument("--classify-always", action="store_true", help="Always classify every page with LLM (slower)")
-    ap.add_argument("--speed-mode", type=str, default="balanced", choices=["full_llm", "balanced", "fast", "ultra_fast"], help="Speed mode: full_llm (best quality), balanced (~30s), fast (~10s), ultra_fast (~5s)")
+    ap.add_argument("--speed-mode", type=str, default="normal", choices=["normal", "ultra_fast", "no_llm", "full_llm", "balanced", "fast"], help="Speed mode: normal (vision-direct, max parallelism), ultra_fast (faster, lower quality), no_llm (basic text extraction), full_llm (legacy), balanced (legacy), fast (legacy)")
     ap.add_argument("--image-scale", type=float, default=2.2, help="Image render scale for figure/equation crops (lower=faster)")
     ap.add_argument("--image-alpha", action="store_true", help="Render images with alpha channel (slower)")
     ap.add_argument("--no-table-detect", action="store_true", help="Disable structural table detection from PDF layout")
@@ -6338,6 +6564,9 @@ def _parse_args(argv: Optional[list[str]] = None) -> ConvertConfig:
     out_dir = Path(args.out).expanduser().resolve()
 
     llm: Optional[LlmConfig]
+    # If speed_mode is "no_llm", force no_llm to True
+    if args.speed_mode == "no_llm":
+        args.no_llm = True
     if args.no_llm:
         llm = None
     else:
@@ -6453,7 +6682,8 @@ def main() -> None:
     
     try:
         # Import exactly like test_converter.py
-        from kb.converter import PDFConverter, ConvertConfig, LlmConfig
+        from kb.converter import PDFConverter, ConvertConfig
+        from dataclasses import replace
         
         print("Successfully imported PDFConverter from kb.converter", flush=True)
         
@@ -6473,50 +6703,46 @@ def main() -> None:
         print(f"PDF: {pdf_path}", flush=True)
         print(f"Output dir: {output_dir}", flush=True)
         
-        # LLM config - match test_converter.py logic
-        llm_config = None
-        use_llm = False
-        
-        # First check if cfg.llm is set (from command line args)
-        if cfg.llm:
-            llm_config = LlmConfig(
-                api_key=cfg.llm.api_key,
-                base_url=cfg.llm.base_url,
-                model=cfg.llm.model,
-                max_tokens=getattr(cfg.llm, 'max_tokens', 8192),
-                temperature=getattr(cfg.llm, 'temperature', 0.0),
-                request_sleep_s=getattr(cfg.llm, 'request_sleep_s', 0.0),
-                timeout_s=getattr(cfg.llm, 'timeout_s', 45.0),
-                max_retries=getattr(cfg.llm, 'max_retries', 0),
-            )
-            use_llm = True
-            print(f"LLM enabled from config: {cfg.llm.model} at {cfg.llm.base_url}", flush=True)
-        else:
-            # Respect parsed args strictly:
-            # if --no-llm is set (or llm is otherwise disabled), do NOT auto-enable from env.
-            print("LLM disabled by args/config", flush=True)
-        
         # Get speed mode
         speed_mode = getattr(cfg, 'speed_mode', 'balanced')
         print(f"Speed mode: {speed_mode}", flush=True)
-        
-        # Create config EXACTLY like test_converter.py
-        print("Creating ConvertConfig (exactly like test_converter.py)...", flush=True)
-        new_cfg = ConvertConfig(
-            pdf_path=pdf_path,
-            out_dir=output_dir,  # Final output directory (paper_name subdir)
-            translate_zh=cfg.translate_zh,
-            start_page=cfg.start_page,
-            end_page=cfg.end_page if cfg.end_page >= 0 else -1,  # -1 means all pages
-            skip_existing=cfg.skip_existing,
-            keep_debug=cfg.keep_debug,
-            llm=llm_config,
-            speed_mode=speed_mode,
-        )
-        print("ConvertConfig created", flush=True)
-        
-        # Create converter EXACTLY like test_converter.py
-        print("Creating PDFConverter (exactly like test_converter.py)...", flush=True)
+
+        # IMPORTANT: keep parsed cfg fields (workers/llm_workers, llm_repair flags, batch sizes, etc).
+        # Previously we rebuilt ConvertConfig with only a subset of fields, silently dropping those knobs.
+        print("Creating ConvertConfig (preserving parsed args)...", flush=True)
+        new_cfg = replace(cfg, pdf_path=pdf_path, out_dir=output_dir, speed_mode=str(speed_mode))
+        # Type-guard for older modules / hot-reloads where cfg isn't a dataclass instance.
+        if not isinstance(new_cfg, ConvertConfig):
+            new_cfg = ConvertConfig(
+                pdf_path=pdf_path,
+                out_dir=output_dir,
+                translate_zh=bool(getattr(cfg, "translate_zh", False)),
+                start_page=int(getattr(cfg, "start_page", 0) or 0),
+                end_page=int(getattr(cfg, "end_page", -1) or -1),
+                skip_existing=bool(getattr(cfg, "skip_existing", False)),
+                keep_debug=bool(getattr(cfg, "keep_debug", False)),
+                llm=getattr(cfg, "llm", None),
+                llm_classify=bool(getattr(cfg, "llm_classify", True)),
+                llm_render_page=bool(getattr(cfg, "llm_render_page", False)),
+                llm_classify_only_if_needed=bool(getattr(cfg, "llm_classify_only_if_needed", True)),
+                classify_batch_size=int(getattr(cfg, "classify_batch_size", 40) or 40),
+                image_scale=float(getattr(cfg, "image_scale", 2.2) or 2.2),
+                image_alpha=bool(getattr(cfg, "image_alpha", False)),
+                detect_tables=bool(getattr(cfg, "detect_tables", True)),
+                table_pdfplumber_fallback=bool(getattr(cfg, "table_pdfplumber_fallback", False)),
+                eq_image_fallback=bool(getattr(cfg, "eq_image_fallback", False)),
+                global_noise_scan=bool(getattr(cfg, "global_noise_scan", True)),
+                llm_repair=bool(getattr(cfg, "llm_repair", True)),
+                llm_repair_body_math=bool(getattr(cfg, "llm_repair_body_math", False)),
+                llm_smart_math_repair=bool(getattr(cfg, "llm_smart_math_repair", True)),
+                llm_auto_page_render_threshold=int(getattr(cfg, "llm_auto_page_render_threshold", 12) or 12),
+                llm_workers=int(getattr(cfg, "llm_workers", 1) or 1),
+                workers=int(getattr(cfg, "workers", 1) or 1),
+                speed_mode=str(speed_mode),
+            )
+
+        # Create converter
+        print("Creating PDFConverter...", flush=True)
         converter = PDFConverter(new_cfg)
         converter.dpi = 200
         converter.analyze_quality = True

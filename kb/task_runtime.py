@@ -454,7 +454,10 @@ def _bg_worker_loop() -> None:
         out_root = Path(task["out_root"])
         db_dir = Path(task.get("db_dir") or "").expanduser() if task.get("db_dir") else None
         no_llm = bool(task.get("no_llm", False))
-        eq_image_fallback = bool(task.get("eq_image_fallback", True))
+        # Equation image fallback should be a last resort.
+        # - For full_llm (quality-first), prefer editable/searchable LaTeX over screenshots.
+        # - In no-LLM degraded runs, `kb/pdf_tools.run_pdf_to_md` will force-enable it to preserve fidelity.
+        eq_image_fallback = bool(task.get("eq_image_fallback", False))
         replace = bool(task.get("replace", False))
         speed_mode = str(task.get("speed_mode", "balanced"))
         if speed_mode == "ultra_fast":
@@ -561,7 +564,9 @@ def _build_bg_task(
         "out_root": str(out_root),
         "db_dir": str(db_dir),
         "no_llm": bool(no_llm or ultra_fast),
-        "eq_image_fallback": False if ultra_fast else True,
+        # Default OFF across all normal modes; enable only explicitly.
+        # In no-LLM runs we still force-enable it inside `run_pdf_to_md` for fidelity.
+        "eq_image_fallback": False,
         "replace": bool(replace),
         "speed_mode": mode,
         "name": pdf.name,

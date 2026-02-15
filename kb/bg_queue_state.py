@@ -68,6 +68,7 @@ def begin_next_task_or_idle(state: dict[str, Any], lock: Lock) -> dict[str, Any]
             state["running"] = True
             state["current"] = str(task.get("name") or "")
             state["cur_task_id"] = str(task.get("_tid") or "")
+            state["cur_task_replace"] = bool(task.get("replace", False))  # Save replace flag for UI
             state["cur_page_done"] = 0
             state["cur_page_total"] = 0
             state["cur_page_msg"] = ""
@@ -79,6 +80,7 @@ def begin_next_task_or_idle(state: dict[str, Any], lock: Lock) -> dict[str, Any]
         state["running"] = False
         state["current"] = ""
         state["cur_task_id"] = ""
+        state["cur_task_replace"] = False  # Clear replace flag
         state["cur_page_done"] = 0
         state["cur_page_total"] = 0
         state["cur_page_msg"] = ""
@@ -100,10 +102,16 @@ def update_page_progress(
     with lock:
         cur_tid = str(state.get("cur_task_id") or "")
         tid = str(task_id or "")
+        
+        # If task_id is provided, it must match cur_task_id
+        # But if task_id is empty (legacy/fallback), accept updates if task is running
         if tid:
             if (not cur_tid) or (tid != cur_tid):
                 # Ignore stale updates from older/foreign worker threads.
                 return
+        elif not bool(state.get("running")):
+            # If no task_id provided and no task is running, ignore
+            return
 
         old_done = int(state.get("cur_page_done", 0) or 0)
         old_total = int(state.get("cur_page_total", 0) or 0)

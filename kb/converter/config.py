@@ -43,6 +43,7 @@ class ConvertConfig:
     llm_auto_page_render_threshold: int = 12
     llm_workers: int = 1
     workers: int = 1
+    speed_mode: str = "normal"  # "normal" (vision-direct with max parallelism), "ultra_fast" (faster, lower quality), "no_llm" (basic text extraction)
 
 
 @dataclass(frozen=True)

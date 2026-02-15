@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import hashlib
@@ -13,10 +13,17 @@ import uuid
 from pathlib import Path
 
 import streamlit as st
-from ui.runtime_patches import _init_theme_css, _inject_auto_rerun_once, _inject_chat_dock_runtime, _inject_copy_js, _inject_runtime_ui_fixes, _set_live_streaming_mode, _teardown_chat_dock_runtime
+from ui.runtime_patches import (
+    _init_theme_css,
+    _inject_chat_dock_runtime,
+    _inject_copy_js,
+    _inject_runtime_ui_fixes,
+    _set_live_streaming_mode,
+    _teardown_chat_dock_runtime,
+)
 from ui.strings import S
 from ui.chat_widgets import _normalize_math_markdown, _render_ai_live_header, _render_answer_copy_bar, _render_app_title, _resolve_sidebar_logo_path, _sidebar_logo_data_uri
-from ui.refs_renderer import _render_refs
+from ui.refs_renderer import _annotate_equation_tags_with_sources, _render_inpaper_citation_resolver, _render_refs
 
 from kb.chat_store import ChatStore
 from kb.bg_queue_state import is_running_snapshot as bg_is_running_snapshot
@@ -54,19 +61,43 @@ def _patch_streamlit_label_visibility_compat() -> None:
     Streamlit <=1.12 does not support `label_visibility` on some widgets.
     Keep backward compatibility so stale hot-reload modules do not crash.
     """
+    def _wrap_drop_label_visibility(fn, *, tag: str):
+        """
+        Make the patch idempotent across Streamlit reruns.
+        Streamlit reruns re-exec this file, and naive wrapping will create recursion.
+        """
+        try:
+            if getattr(fn, "__kb_drop_label_visibility__", False):
+                return fn
+        except Exception:
+            pass
+        try:
+            orig = getattr(fn, "__kb_drop_label_visibility_orig__", None) or fn
+        except Exception:
+            orig = fn
+
+        def _compat(*args, **kwargs):
+            kwargs.pop("label_visibility", None)
+            return orig(*args, **kwargs)
+
+        try:
+            _compat.__kb_drop_label_visibility__ = True  # type: ignore[attr-defined]
+            _compat.__kb_drop_label_visibility_orig__ = orig  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            _compat.__name__ = f"{getattr(fn, '__name__', tag)}__kb_compat"
+        except Exception:
+            pass
+        return _compat
+
     try:
         sig_cb = inspect.signature(st.checkbox)
         cb_supports = "label_visibility" in sig_cb.parameters
     except Exception:
         cb_supports = True
     if not cb_supports:
-        orig_cb = st.checkbox
-
-        def _checkbox_compat(*args, **kwargs):
-            kwargs.pop("label_visibility", None)
-            return orig_cb(*args, **kwargs)
-
-        st.checkbox = _checkbox_compat  # type: ignore[assignment]
+        st.checkbox = _wrap_drop_label_visibility(st.checkbox, tag="checkbox")  # type: ignore[assignment]
 
     try:
         sig_ti = inspect.signature(st.text_input)
@@ -74,13 +105,7 @@ def _patch_streamlit_label_visibility_compat() -> None:
     except Exception:
         ti_supports = True
     if not ti_supports:
-        orig_ti = st.text_input
-
-        def _text_input_compat(*args, **kwargs):
-            kwargs.pop("label_visibility", None)
-            return orig_ti(*args, **kwargs)
-
-        st.text_input = _text_input_compat  # type: ignore[assignment]
+        st.text_input = _wrap_drop_label_visibility(st.text_input, tag="text_input")  # type: ignore[assignment]
 
 
 _patch_streamlit_label_visibility_compat()
@@ -335,7 +360,9 @@ def _page_chat(
     show_context: bool,
     deep_read: bool,
 ) -> None:
-    _inject_copy_js()
+    disable_hooks = str(os.environ.get("KB_DISABLE_FRONTEND_HOOKS") or "").strip() in {"1", "true", "TRUE", "yes", "YES"}
+    if not disable_hooks:
+        _inject_copy_js()
 
     retriever_err = str(st.session_state.get("retriever_load_error") or "").strip()
     if retriever_err:
@@ -393,7 +420,7 @@ def _page_chat(
     if not isinstance(refs_by_user, dict):
         refs_by_user = {}
 
-    def _render_refs_for_user(user_msg_id: int, prompt_text: str, *, pending: bool = False) -> None:
+    def _render_refs_for_user(user_msg_id: int, prompt_text: str, assistant_text: str, *, pending: bool = False) -> None:
         ref_pack = refs_by_user.get(user_msg_id) if isinstance(refs_by_user, dict) else None
         hits_hist: list[dict] = []
         prompt_hist = str(prompt_text or "").strip()
@@ -416,6 +443,12 @@ def _page_chat(
                         key_ns=f"hist_{conv_id}_{user_msg_id}",
                         refs_open_key=open_key_hist,
                         settings=settings,
+                    )
+                    # Resolve in-paper numeric citations like [45] shown in the assistant answer.
+                    _render_inpaper_citation_resolver(
+                        hits_hist,
+                        assistant_text=str(assistant_text or ""),
+                        key_ns=f"hist_{conv_id}_{user_msg_id}",
                     )
                 elif pending:
                     st.caption("（参考定位生成中…）")
@@ -472,7 +505,15 @@ def _page_chat(
                             if notice:
                                 st.markdown(f"<div class='kb-notice'>{html.escape(notice)}</div>", unsafe_allow_html=True)
                             if (body or "").strip():
-                                st.markdown(_normalize_math_markdown(body))
+                                hits_for_anno = []
+                                try:
+                                    pack = refs_by_user.get(last_user_msg_id) if isinstance(refs_by_user, dict) else None
+                                    if isinstance(pack, dict):
+                                        hits_for_anno = list(pack.get("hits") or [])
+                                except Exception:
+                                    hits_for_anno = []
+                                body2 = _annotate_equation_tags_with_sources(body, hits_for_anno)
+                                st.markdown(_normalize_math_markdown(body2))
                             else:
                                 st.markdown("<div class='kb-ai-live-dots'>...</div>", unsafe_allow_html=True)
                         else:
@@ -483,7 +524,15 @@ def _page_chat(
                                 if notice:
                                     st.markdown(f"<div class='kb-notice'>{html.escape(notice)}</div>", unsafe_allow_html=True)
                                 if (body or "").strip():
-                                    st.markdown(_normalize_math_markdown(body))
+                                    hits_for_anno = []
+                                    try:
+                                        pack = refs_by_user.get(last_user_msg_id) if isinstance(refs_by_user, dict) else None
+                                        if isinstance(pack, dict):
+                                            hits_for_anno = list(pack.get("hits") or [])
+                                    except Exception:
+                                        hits_for_anno = []
+                                    body2 = _annotate_equation_tags_with_sources(body, hits_for_anno)
+                                    st.markdown(_normalize_math_markdown(body2))
                             else:
                                 st.markdown("<div class='msg-meta'>AI（处理中）</div>", unsafe_allow_html=True)
                                 st.caption("处理中…")
@@ -497,10 +546,32 @@ def _page_chat(
                     if notice:
                         st.markdown(f"<div class='kb-notice'>{html.escape(notice)}</div>", unsafe_allow_html=True)
                     if (body or "").strip():
-                        st.markdown(_normalize_math_markdown(body))
+                        hits_for_anno = []
+                        try:
+                            pack = refs_by_user.get(last_user_msg_id) if isinstance(refs_by_user, dict) else None
+                            if isinstance(pack, dict):
+                                hits_for_anno = list(pack.get("hits") or [])
+                        except Exception:
+                            hits_for_anno = []
+                        body2 = _annotate_equation_tags_with_sources(body, hits_for_anno)
+                        st.markdown(_normalize_math_markdown(body2))
 
                 if (last_user_msg_id > 0) and (last_user_msg_id not in shown_refs_user_ids):
-                    _render_refs_for_user(last_user_msg_id, str(last_user_for_refs or "").strip(), pending=pending)
+                    # Use the current assistant text (partial/answer/content) to extract in-paper citations.
+                    assistant_text_for_refs = ""
+                    try:
+                        if _is_live_assistant_text(content) and isinstance(t0, dict):
+                            assistant_text_for_refs = str(t0.get("partial") or t0.get("answer") or "")
+                        else:
+                            assistant_text_for_refs = str(content or "")
+                    except Exception:
+                        assistant_text_for_refs = str(content or "")
+                    _render_refs_for_user(
+                        last_user_msg_id,
+                        str(last_user_for_refs or "").strip(),
+                        assistant_text_for_refs,
+                        pending=pending,
+                    )
                     shown_refs_user_ids.add(last_user_msg_id)
             st.markdown("")
 
@@ -518,7 +589,8 @@ def _page_chat(
         with action_cols[2]:
             submitted = st.form_submit_button("↑")
 
-    _inject_chat_dock_runtime()
+    if not disable_hooks:
+        _inject_chat_dock_runtime()
 
     if stop_clicked:
         t0 = _gen_get_task(session_id)
@@ -568,6 +640,16 @@ def _page_chat(
             if not ok:
                 chat_store.update_message_content(assistant_msg_id, "（启动生成失败）")
             st.experimental_rerun()
+
+    # --- Streaming poll loop (Python-only, avoid frontend JS hooks) ---
+    # When a background generation task is running, Streamlit won't refresh `partial`
+    # unless the script reruns. Use a gentle polling rerun to keep the UI updating.
+    if running_for_conv and (not stop_clicked) and (not submitted):
+        try:
+            time.sleep(0.6)
+        except Exception:
+            pass
+        st.experimental_rerun()
 
     # Adaptive server-side polling:
     # - fast when new tokens arrive
@@ -911,54 +993,59 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
     st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
     st.subheader(S["convert_opts"])
     
-    # Speed mode selection
+    # Speed mode selection - only three modes: normal, ultra_fast, no_llm
     speed_mode_options = {
-        "full_llm": "全LLM模式 - 最高质量（无时间限制）",
-        "balanced": "平衡模式 - 约30秒/篇，质量良好（推荐）",
-        "fast": "快速模式 - 约10秒/篇，质量可接受",
-        "ultra_fast": "超快模式 - 约5秒/篇，基础质量"
+        "normal": "普通模式 - 截图识别，最大并行度，质量最佳",
+        "ultra_fast": "超快模式 - 截图识别，降低质量换取速度",
+        "no_llm": "无LLM模式 - 基础文本提取，不使用多模态模型"
     }
     
     # Get current speed mode from session state or default
-    current_speed_mode = st.session_state.get("lib_speed_mode", "balanced")
+    current_speed_mode = st.session_state.get("lib_speed_mode", "normal")
+    if current_speed_mode not in speed_mode_options:
+        current_speed_mode = "normal"
     
     # Create a nice UI for speed mode selection
     col1, col2 = st.columns([2, 1])
     with col1:
         speed_mode = st.selectbox(
-            "转换速度模式",
+            "转换模式",
             options=list(speed_mode_options.keys()),
             format_func=lambda x: speed_mode_options[x],
-            index=list(speed_mode_options.keys()).index(current_speed_mode) if current_speed_mode in speed_mode_options else 1,
+            index=list(speed_mode_options.keys()).index(current_speed_mode) if current_speed_mode in speed_mode_options else 0,
             key="lib_speed_mode",
-            help="选择转换速度和质量的平衡点。平衡模式推荐用于大多数情况。"
+            help="选择转换模式。普通模式使用截图识别+最大并行度，质量最佳；超快模式降低质量换取速度；无LLM模式不使用多模态模型。"
         )
-        # Note: st.selectbox automatically updates st.session_state["lib_speed_mode"]
-        # No need to manually set it
     
     with col2:
         # Show mode icon/indicator
         mode_icons = {
-            "full_llm": "⭐",
-            "balanced": "⚡",
-            "fast": "🚀",
-            "ultra_fast": "💨"
+            "normal": "⭐",
+            "ultra_fast": "💨",
+            "no_llm": "📄"
         }
-        st.markdown(f"### {mode_icons.get(speed_mode, '⚡')}")
+        st.markdown(f"### {mode_icons.get(speed_mode, '⭐')}")
     
     # Show mode description with styling
     mode_colors = {
-        "full_llm": "🔵",
-        "balanced": "🟢",
-        "fast": "🟡",
-        "ultra_fast": "🟠"
+        "normal": "🔵",
+        "ultra_fast": "🟠",
+        "no_llm": "⚪"
     }
-    st.info(f"{mode_colors.get(speed_mode, '🟢')} **当前模式：{speed_mode_options[speed_mode]}**")
+    st.info(f"{mode_colors.get(speed_mode, '🔵')} **当前模式：{speed_mode_options[speed_mode]}**")
     
-    no_llm_ui = st.checkbox(S["no_llm"], value=False, key="lib_no_llm")
-    no_llm = bool(no_llm_ui or (speed_mode == "ultra_fast"))
-    if speed_mode == "ultra_fast":
-        st.caption("超快模式已强制关闭 LLM，并跳过自动入库以优先速度。")
+    # Set no_llm flag based on speed_mode
+    no_llm = (speed_mode == "no_llm")
+    
+    # Vision-direct mode is always enabled for normal and ultra_fast modes
+    # (no_llm mode doesn't use LLM, so vision-direct is not applicable)
+    try:
+        if speed_mode in ["normal", "ultra_fast"]:
+            os.environ["KB_PDF_VISION_MODE"] = "1"
+        else:
+            os.environ.pop("KB_PDF_VISION_MODE", None)
+    except Exception:
+        pass
 
     st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
     st.subheader("\u5df2\u6709\u6587\u732e")
@@ -983,18 +1070,126 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
         if len(pdfs_view) < len(pdfs):
             st.caption(f"\u4e3a\u4fdd\u8bc1\u901f\u5ea6\uff0c\u5f53\u524d\u4ec5\u5c55\u793a {len(pdfs_view)}/{len(pdfs)} \u4e2a PDF\u3002")
 
+        # Get background task state to check for re-conversion tasks
+        bg2 = _bg_snapshot()
+        queue_tasks = list(bg2.get("queue") or [])
+        current_name = str(bg2.get("current") or "")
+        running_any = bool(bg2.get("running"))
+        
+        # Build a map of PDF -> task info (replace flag, queued/running status)
+        # Use normalized paths for comparison (resolve to absolute paths)
+        # Also build a name-based map as fallback
+        pdf_task_map = {}
+        pdf_name_map = {}  # Map by filename for fallback matching
+        for task in queue_tasks:
+            pdf_str = str(task.get("pdf") or "")
+            task_name = str(task.get("name") or "")
+            if pdf_str:
+                try:
+                    # Normalize path for comparison
+                    pdf_path_normalized = str(Path(pdf_str).resolve())
+                    task_info = {
+                        "replace": bool(task.get("replace", False)),
+                        "queued": True,
+                        "running": False,
+                        "original_path": pdf_str,
+                    }
+                    pdf_task_map[pdf_path_normalized] = task_info
+                    # Also index by filename for fallback
+                    if task_name:
+                        pdf_name_map[task_name] = task_info
+                except Exception:
+                    # Fallback to string comparison if path resolution fails
+                    task_info = {
+                        "replace": bool(task.get("replace", False)),
+                        "queued": True,
+                        "running": False,
+                        "original_path": pdf_str,
+                    }
+                    pdf_task_map[pdf_str] = task_info
+                    if task_name:
+                        pdf_name_map[task_name] = task_info
+        if running_any and current_name:
+            # Check if current task matches any PDF
+            cur_task_replace = bool(bg2.get("cur_task_replace", False))
+            for pdf in pdfs_view:
+                if pdf.name == current_name:
+                    try:
+                        pdf_str_normalized = str(pdf.resolve())
+                    except Exception:
+                        pdf_str_normalized = str(pdf)
+                    pdf_str = str(pdf)
+                    
+                    # Check both normalized and original paths
+                    found = False
+                    if pdf_str_normalized in pdf_task_map:
+                        pdf_task_map[pdf_str_normalized]["running"] = True
+                        pdf_task_map[pdf_str_normalized]["replace"] = cur_task_replace
+                        found = True
+                    else:
+                        # Also check by original path string
+                        for key, info in pdf_task_map.items():
+                            if info.get("original_path") == pdf_str or key == pdf_str:
+                                pdf_task_map[key]["running"] = True
+                                pdf_task_map[key]["replace"] = cur_task_replace
+                                found = True
+                                break
+                        # Fallback: check by filename
+                        if not found and pdf.name in pdf_name_map:
+                            pdf_name_map[pdf.name]["running"] = True
+                            pdf_name_map[pdf.name]["replace"] = cur_task_replace
+                            found = True
+                    
+                    if not found:
+                        # Current task might not be in queue anymore (already started)
+                        pdf_task_map[pdf_str_normalized] = {
+                            "replace": cur_task_replace,
+                            "queued": False,
+                            "running": True,
+                            "original_path": pdf_str,
+                        }
+                        pdf_name_map[pdf.name] = pdf_task_map[pdf_str_normalized]
+        
         converted = []
         pending = []
         for pdf in pdfs_view:
             md_folder, md_main, md_exists = _resolve_md_output_paths(md_out_root, pdf)
-            item = {"pdf": pdf, "md_folder": md_folder, "md_main": md_main, "md_exists": md_exists}
-            (converted if md_exists else pending).append(item)
-
-        tabs = st.tabs([
-            f"\u672a\u8f6c\u6362 ({len(pending)})",
-            f"\u5df2\u8f6c\u6362 ({len(converted)})",
-            f"\u5f53\u524d\u5217\u8868 ({len(pdfs_view)})",
-        ])
+            # Try to find task info using normalized path
+            try:
+                pdf_str_normalized = str(pdf.resolve())
+            except Exception:
+                pdf_str_normalized = str(pdf)
+            pdf_str = str(pdf)
+            
+            # Look up task info - try normalized path first, then original path, then filename
+            task_info = pdf_task_map.get(pdf_str_normalized, {})
+            if not task_info:
+                # Try to find by original path string
+                for key, info in pdf_task_map.items():
+                    if info.get("original_path") == pdf_str or key == pdf_str:
+                        task_info = info
+                        break
+            # Fallback: check by filename
+            if not task_info and pdf.name in pdf_name_map:
+                task_info = pdf_name_map[pdf.name]
+            
+            # If file is being re-converted (replace=True), treat it as pending
+            is_reconverting = task_info.get("replace", False) and (task_info.get("queued", False) or task_info.get("running", False))
+            # Also check if file is queued or running (even without replace, it should show in pending if not converted yet)
+            is_queued_or_running = task_info.get("queued", False) or task_info.get("running", False)
+            
+            # Classify: if MD exists AND not being re-converted AND not queued/running, it's converted; otherwise pending
+            item = {
+                "pdf": pdf,
+                "md_folder": md_folder,
+                "md_main": md_main,
+                "md_exists": md_exists,
+                "task_info": task_info,
+            }
+            if md_exists and not is_reconverting and not is_queued_or_running:
+                converted.append(item)
+            else:
+                pending.append(item)
 
         def render_bg_progress_under_tasks(*, key_ns: str) -> None:
             """
@@ -1008,9 +1203,6 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
             running = bg_is_running_snapshot(bg2)
             if not running:
                 return
-            # Auto-refresh should only run in the pending-task progress area.
-            # Triggering rerun inside "done/all" tabs interrupts list rendering.
-            allow_auto_refresh = (key_ns == "tab_pending_bottom")
             
             done = int(bg2.get("done", 0) or 0)
             total = int(bg2.get("total", 0) or 0)
@@ -1068,36 +1260,24 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
             with c_bg[0]:
                 # Refresh button - just rerun, don't affect background tasks
                 if st.button("🔄 刷新", key=f"{key_ns}_refresh"):
-                    # Use a small delay to ensure state is read before rerun
-                    import time
-                    time.sleep(0.1)
                     st.experimental_rerun()
             with c_bg[1]:
                 if st.button("⏹️ 停止", key=f"{key_ns}_stop"):
                     _bg_cancel_all()
-                    # Small delay before rerun to ensure cancel is processed
-                    import time
-                    time.sleep(0.1)
                     st.experimental_rerun()
             with c_bg[2]:
-                # Always auto-refresh while background conversion is running.
-                # Removing the toggle avoids "stuck at 100%" caused by manual refresh being off.
-                st.caption("自动刷新中")
-                if running and allow_auto_refresh:
-                    _inject_auto_rerun_once(delay_ms=1500)
+                # Auto-refresh is scheduled globally in the sidebar status area.
+                st.caption(f"自动刷新中 · 心跳 {time.strftime('%H:%M:%S')}")
             
             if p_tail:
                 with st.expander("📋 进度日志", expanded=False):
                     for ln in p_tail[-12:]:
                         st.caption(ln)
 
-            # Server-side fallback auto-refresh:
-            # Some environments block the front-end postMessage rerun path.
-            # This guarantees progress moves without manual clicks.
-            if running and allow_auto_refresh:
-                import time as _t
-                _t.sleep(1.5)
-                st.experimental_rerun()
+            # NOTE:
+            # Do not call server-side rerun here (inside tab blocks), it may interrupt
+            # rendering of sibling tabs. Global server-side fallback rerun is handled
+            # once at the end of main().
 
         def render_items(items: list[dict], *, show_missing_badge: bool, key_ns: str) -> None:
             from typing import Optional
@@ -1108,10 +1288,25 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
             running_any = bool(bg2.get("running"))
 
             def _queue_pos(pdf_path: Path) -> Optional[int]:
-                p = str(pdf_path)
+                # Normalize paths for comparison
+                try:
+                    p_normalized = str(pdf_path.resolve())
+                    p_original = str(pdf_path)
+                except Exception:
+                    p_normalized = str(pdf_path)
+                    p_original = str(pdf_path)
+                
                 for i, t in enumerate(queue_tasks, start=1):
                     try:
-                        if str(t.get("pdf") or "") == p:
+                        task_pdf = str(t.get("pdf") or "")
+                        if not task_pdf:
+                            continue
+                        try:
+                            task_pdf_normalized = str(Path(task_pdf).resolve())
+                        except Exception:
+                            task_pdf_normalized = task_pdf
+                        # Compare both normalized and original paths
+                        if task_pdf_normalized == p_normalized or task_pdf == p_original or task_pdf_normalized == p_original or task_pdf == p_normalized:
                             return i
                     except Exception:
                         continue
@@ -1121,14 +1316,31 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
                 pdf = it["pdf"]
                 md_main = it["md_main"]
                 md_exists = bool(it["md_exists"])
+                task_info = it.get("task_info", {})
                 uid = hashlib.md5(str(pdf).encode("utf-8", "ignore")).hexdigest()[:10]
 
-                badge = "\u3010\u672a\u8f6c\u6362\u3011" if (show_missing_badge and not md_exists) else "\u3010\u5df2\u8f6c\u6362\u3011"
+                queued_pos = _queue_pos(pdf)
+                running_this = running_any and (current_name == pdf.name)
+                is_reconverting = task_info.get("replace", False) and (task_info.get("queued", False) or task_info.get("running", False))
+                
+                # Determine badge based on status
+                if running_this:
+                    badge = "\u3010\u8f6c\u6362\u4e2d\u3011"
+                elif queued_pos is not None:
+                    if task_info.get("replace", False):
+                        badge = "\u3010\u91cd\u65b0\u8f6c\u6362\u961f\u5217\u4e2d\u3011"
+                    else:
+                        badge = "\u3010\u8f6c\u6362\u961f\u5217\u4e2d\u3011"
+                elif is_reconverting:
+                    badge = "\u3010\u91cd\u65b0\u8f6c\u6362\u4e2d\u3011"
+                elif show_missing_badge and not md_exists:
+                    badge = "\u3010\u672a\u8f6c\u6362\u3011"
+                else:
+                    badge = "\u3010\u5df2\u8f6c\u6362\u3011"
+                
                 title = f"{badge} {pdf.name}"
 
                 with st.expander(title, expanded=False):
-                    queued_pos = _queue_pos(pdf)
-                    running_this = running_any and (current_name == pdf.name)
                     del_key = f"{key_ns}_del_state_{uid}"
                     if del_key not in st.session_state:
                         st.session_state[del_key] = False
@@ -1278,40 +1490,78 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
                                 st.session_state[del_key] = False
                                 st.experimental_rerun()
 
-        with tabs[0]:
-            if pending:
-                c_bulk = st.columns([1, 2])
-                with c_bulk[0]:
-                    if st.button("\u6279\u91cf\u8f6c\u6362\u5168\u90e8\u672a\u8f6c\u6362\uff08\u540e\u53f0\uff09", key="bulk_convert_pending"):
-                        for it in pending:
-                            pdf = it["pdf"]
-                            _bg_enqueue(
-                                _build_bg_task(
-                                    pdf_path=pdf,
-                                    out_root=md_out_root,
-                                    db_dir=db_dir,
-                                    no_llm=bool(no_llm),
-                                    replace=False,
-                                    speed_mode=str(speed_mode),
+        # During conversion, auto-refresh relies on frequent Streamlit reruns.
+        # Rendering hundreds of expanders/buttons every second makes reruns slow, so the progress
+        # bar *appears* not to refresh. We default to a compact view while tasks are running.
+        bg_view = _bg_snapshot()
+        running_view = bg_is_running_snapshot(bg_view)
+        show_full_list = True
+        if running_view:
+            show_full_list = st.checkbox(
+                "\u8f6c\u6362\u8fdb\u884c\u4e2d\u4e5f\u663e\u793a\u5b8c\u6574\u6587\u4ef6\u5217\u8868\uff08\u53ef\u80fd\u5361\u987f\uff09",
+                value=False,
+                key="lib_show_full_list_during_run",
+                help="\u4e3a\u4fdd\u8bc1\u8fdb\u5ea6\u6761\u80fd\u6bcf\u79d2\u5237\u65b0\uff0c\u8f6c\u6362\u65f6\u9ed8\u8ba4\u4e0d\u6e32\u67d3\u5927\u5217\u8868\u3002",
+            )
+
+        if not show_full_list:
+            render_bg_progress_under_tasks(key_ns="lib_compact_progress")
+            q = list(bg_view.get("queue") or [])
+            if q:
+                names: list[str] = []
+                for t in q[:12]:
+                    nm = str(t.get("name") or "").strip()
+                    if not nm:
+                        try:
+                            nm = Path(str(t.get("pdf") or "")).name
+                        except Exception:
+                            nm = str(t.get("pdf") or "").strip()
+                    if nm:
+                        names.append(nm)
+                if names:
+                    st.caption("\u961f\u5217\uff08\u524d 12\uff09\uff1a" + "\u3001".join(names) + ("\u2026" if len(q) > 12 else ""))
+            st.caption(f"\u5217\u8868\u7edf\u8ba1\uff1a\u672a\u8f6c\u6362 {len(pending)} | \u5df2\u8f6c\u6362 {len(converted)}\u3002\u9700\u67e5\u770b\u6587\u4ef6\u64cd\u4f5c\uff0c\u8bf7\u52fe\u9009\u4e0a\u65b9\u201c\u663e\u793a\u5b8c\u6574\u5217\u8868\u201d\u3002")
+        else:
+            tabs = st.tabs([
+                f"\u672a\u8f6c\u6362 ({len(pending)})",
+                f"\u5df2\u8f6c\u6362 ({len(converted)})",
+                f"\u5f53\u524d\u5217\u8868 ({len(pdfs_view)})",
+            ])
+
+            with tabs[0]:
+                if pending:
+                    c_bulk = st.columns([1, 2])
+                    with c_bulk[0]:
+                        if st.button("\u6279\u91cf\u8f6c\u6362\u5168\u90e8\u672a\u8f6c\u6362\uff08\u540e\u53f0\uff09", key="bulk_convert_pending"):
+                            for it in pending:
+                                pdf = it["pdf"]
+                                _bg_enqueue(
+                                    _build_bg_task(
+                                        pdf_path=pdf,
+                                        out_root=md_out_root,
+                                        db_dir=db_dir,
+                                        no_llm=bool(no_llm),
+                                        replace=False,
+                                        speed_mode=str(speed_mode),
+                                    )
                                 )
-                            )
-                        st.info(f"\u5df2\u628a {len(pending)} \u4e2a\u6587\u4ef6\u52a0\u5165\u540e\u53f0\u961f\u5217\u3002")
-                        st.experimental_rerun()
-                with c_bulk[1]:
-                    st.markdown("<div class='refbox'>\u8f6c\u6362\u4f1a\u5728\u540e\u53f0\u8fd0\u884c\uff0c\u4f60\u53ef\u4ee5\u76f4\u63a5\u5207\u6362\u5230\u201c\u5bf9\u8bdd\u201d\u9875\u3002</div>", unsafe_allow_html=True)
-                render_items(pending, show_missing_badge=True, key_ns="tab_pending")
-            else:
-                st.caption("\u5168\u90e8\u90fd\u5df2\u8f6c\u6362\u3002")
-            # Always render progress *under* the list (user expects it here).
-            render_bg_progress_under_tasks(key_ns="tab_pending_bottom")
+                            st.info(f"\u5df2\u628a {len(pending)} \u4e2a\u6587\u4ef6\u52a0\u5165\u540e\u53f0\u961f\u5217\u3002")
+                            st.experimental_rerun()
+                    with c_bulk[1]:
+                        st.markdown("<div class='refbox'>\u8f6c\u6362\u4f1a\u5728\u540e\u53f0\u8fd0\u884c\uff0c\u4f60\u53ef\u4ee5\u76f4\u63a5\u5207\u6362\u5230\u201c\u5bf9\u8bdd\u201d\u9875\u3002</div>", unsafe_allow_html=True)
+                    render_items(pending, show_missing_badge=True, key_ns="tab_pending")
+                else:
+                    st.caption("\u5168\u90e8\u90fd\u5df2\u8f6c\u6362\u3002")
+                # Always render progress *under* the list (user expects it here).
+                render_bg_progress_under_tasks(key_ns="tab_pending_bottom")
 
-        with tabs[1]:
-            render_bg_progress_under_tasks(key_ns="tab_done")
-            render_items(converted, show_missing_badge=False, key_ns="tab_done")
+            with tabs[1]:
+                render_bg_progress_under_tasks(key_ns="tab_done")
+                render_items(converted, show_missing_badge=False, key_ns="tab_done")
 
-        with tabs[2]:
-            render_bg_progress_under_tasks(key_ns="tab_all")
-            render_items(pending + converted, show_missing_badge=True, key_ns="tab_all")
+            with tabs[2]:
+                render_bg_progress_under_tasks(key_ns="tab_all")
+                render_items(pending + converted, show_missing_badge=True, key_ns="tab_all")
 
     st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
     st.subheader(S["upload_pdf"])
@@ -1393,6 +1643,9 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
 
 def main() -> None:
     st.set_page_config(page_title=S["title"], layout="wide")
+    # Diagnostic heartbeat: increments on every Streamlit script run.
+    st.session_state["_run_tick"] = int(st.session_state.get("_run_tick", 0) or 0) + 1
+    st.session_state["_run_tick_ts"] = time.strftime("%H:%M:%S")
     if "ui_theme" not in st.session_state:
         st.session_state["ui_theme"] = "light"
     _init_theme_css(st.session_state["ui_theme"])
@@ -1475,7 +1728,12 @@ def main() -> None:
             done = int(bg.get("done", 0) or 0)
             total = int(bg.get("total", 0) or 0)
             cur = bg.get("current", "")
-            st.caption(f"后台转换：{done}/{total}{(' | ' + cur) if cur else ''}")
+            run_tick = int(st.session_state.get("_run_tick", 0) or 0)
+            run_tick_ts = str(st.session_state.get("_run_tick_ts") or "")
+            st.caption(
+                f"后台转换：{done}/{total}{(' | ' + cur) if cur else ''} | "
+                f"run#{run_tick} @{run_tick_ts}"
+            )
             if total > 0:
                 st.progress(min(1.0, done / max(1, total)))
             cbg = st.columns(2)
@@ -1545,13 +1803,23 @@ def main() -> None:
         try:
             st.caption(f"Base URL: {getattr(settings, 'base_url', '')}")
             st.caption(f"Model: {getattr(settings, 'model', '')}")
+            try:
+                m0 = str(getattr(settings, "model", "") or "").strip().lower()
+                is_vl = ("vl" in m0) or ("vision" in m0)
+            except Exception:
+                is_vl = False
+            st.caption(f"VL(多模态) 判定: {'是' if is_vl else '否/未知'}")
+            try:
+                st.caption(f"KB_PDF_LLM_VISION_MATH: {str(os.environ.get('KB_PDF_LLM_VISION_MATH','(unset)'))}")
+            except Exception:
+                pass
             st.caption(f"Timeout: {float(getattr(settings, 'timeout_s', 0) or 0):.0f}s | Retries: {int(getattr(settings, 'max_retries', 0) or 0)}")
         except Exception:
             pass
         if getattr(settings, "api_key", None):
             st.caption("API Key：已设置")
         else:
-            st.warning("API Key：未设置（需要 DEEPSEEK_API_KEY 或 OPENAI_API_KEY）。设置后需重启 Streamlit。")
+            st.warning("API Key：未设置（需要 QWEN_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY）。设置后需重启 Streamlit。")
         if st.button("测试模型连接", key="test_llm_btn"):
             try:
                 with st.spinner("测试中…"):
@@ -1560,6 +1828,41 @@ def main() -> None:
                 st.success(f"OK：{out or '(空)'}")
             except Exception as e:
                 st.error(f"测试失败：{e}")
+
+        if st.button("测试VL图片输入", key="test_llm_vl_btn", help="向当前模型发送一张 32x32 PNG（image_url），看服务端是否接受多模态输入。"):
+            try:
+                import base64
+                from openai import OpenAI
+
+                # 32x32 white PNG (some VL endpoints reject tiny images)
+                png_b64 = (
+                    "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAKUlEQVR42u3OIQEAAAACIP+f1hkWWEB6FgEBAQEBAQEBAQEBAQEBgXdgl/rw4tnPBf0AAAAASUVORK5CYII="
+                )
+                data_url = "data:image/png;base64," + png_b64
+                client = OpenAI(api_key=getattr(settings, "api_key", None), base_url=str(getattr(settings, "base_url", "") or ""))
+                with st.spinner("测试VL中…"):
+                    resp = client.chat.completions.create(
+                        model=str(getattr(settings, "model", "") or ""),
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "If you received the image input, reply exactly: IMAGE_OK"},
+                                    {"type": "image_url", "image_url": {"url": data_url}},
+                                ],
+                            }
+                        ],
+                        temperature=0.0,
+                        max_tokens=16,
+                        timeout=float(getattr(settings, "timeout_s", 60.0) or 60.0),
+                    )
+                txt = str(resp.choices[0].message.content or "").strip()
+                if "IMAGE_OK" in txt:
+                    st.success(f"VL OK：{txt}")
+                else:
+                    st.warning(f"请求成功，但未按预期返回 IMAGE_OK：{txt or '(空)'}（模型可能忽略指令，但至少说明服务端接受 image_url）")
+            except Exception as e:
+                st.error(f"VL 测试失败：{e}")
 
         col_a, col_b = st.columns(2)
         with col_a:
@@ -1652,6 +1955,25 @@ def main() -> None:
         _page_library(settings, lib_store, db_dir, prefs_path, prefs, retriever_reload_flag)
 
     # No separate PDF->Markdown page: conversion lives in the library page.
+
+    # Global server-side auto-refresh loop (JS-independent, Streamlit 1.12 compatible).
+    # In old Streamlit versions, there is no native periodic callback. We emulate
+    # a heartbeat by waiting briefly at the end of a run, then forcing rerun.
+    # This avoids relying on browser-side postMessage scripts.
+    bg_end = _bg_snapshot()
+    if bg_is_running_snapshot(bg_end):
+        now_ts = time.time()
+        last_ts = float(st.session_state.get("_global_auto_rerun_ts", 0.0) or 0.0)
+        interval_s = 1.0
+        wait_s = max(0.0, interval_s - (now_ts - last_ts))
+        # Sleep only while tasks are running; keeps refresh cadence stable.
+        if wait_s > 0:
+            time.sleep(min(wait_s, 1.0))
+        st.session_state["_global_auto_rerun_ts"] = time.time()
+        # Use experimental_rerun for broad compatibility.
+        st.experimental_rerun()
+    else:
+        st.session_state["_global_auto_rerun_ts"] = 0.0
 
 
 if __name__ == "__main__":
