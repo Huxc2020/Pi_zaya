@@ -112,7 +112,7 @@ _patch_streamlit_label_visibility_compat()
 
 # Force converter script to this workspace copy, avoiding accidental fallback
 # to an older sibling-repo script when multiple app processes are running.
-_LOCAL_CONVERTER = Path(__file__).resolve().parent / "test2.py"
+_LOCAL_CONVERTER = Path(__file__).resolve().parent / "pdf_to_md.py"
 if _LOCAL_CONVERTER.exists():
     os.environ["KB_PDF_CONVERTER"] = str(_LOCAL_CONVERTER)
 

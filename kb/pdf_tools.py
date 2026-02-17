@@ -868,7 +868,7 @@ def run_pdf_to_md(
 
     Preferred path:
     - Use an external converter script (more capable) if provided via KB_PDF_CONVERTER
-      or if a repo-local test2.py exists.
+      or if a repo-local pdf_to_md.py exists.
     Fallback:
     - Use a built-in fast text extractor (PyMuPDF) so conversion works out-of-the-box
       for collaborators.
@@ -944,16 +944,25 @@ def run_pdf_to_md(
         return True, str(out_dir)
 
     # Prefer an explicit path override (portable across machines / folders):
-    # - KB_PDF_CONVERTER: absolute path to a converter script (e.g. test2.py)
-    # - fallback: resolve to repo-local ../test2.py from this file.
-    #   Keep a legacy fallback to ../../test2.py for older layouts.
+    # - KB_PDF_CONVERTER: absolute path to a converter script (e.g. pdf_to_md.py)
+    # - fallback: resolve to repo-local ../pdf_to_md.py from this file.
+    #   Keep legacy fallbacks to test2.py for older layouts.
     override = (os.environ.get("KB_PDF_CONVERTER") or "").strip().strip('"').strip("'")
     if override:
         script = Path(override).expanduser()
     else:
-        local_script = Path(__file__).resolve().parents[1] / "test2.py"
-        legacy_script = Path(__file__).resolve().parents[2] / "test2.py"
-        script = local_script if local_script.exists() else legacy_script
+        local_script = Path(__file__).resolve().parents[1] / "pdf_to_md.py"
+        legacy_script = Path(__file__).resolve().parents[2] / "pdf_to_md.py"
+        local_compat = Path(__file__).resolve().parents[1] / "test2.py"
+        legacy_compat = Path(__file__).resolve().parents[2] / "test2.py"
+        if local_script.exists():
+            script = local_script
+        elif legacy_script.exists():
+            script = legacy_script
+        elif local_compat.exists():
+            script = local_compat
+        else:
+            script = legacy_compat
     if not script.exists():
         # Collaborator-friendly fallback: still produce an .en.md so the app can run.
         return _fallback_convert()

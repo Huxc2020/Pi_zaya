@@ -83,7 +83,7 @@ $env:KB_PDF_DIR="D:\\papers"
 
 ## 2.1) 转 MD 的效果怎么和我一致
 
-这个项目的 PDF→Markdown 转换器已经跟代码一起放在仓库里：`test2.py`。  
+这个项目的 PDF→Markdown 转换器已经跟代码一起放在仓库里：`pdf_to_md.py`。  
 你在网页里点“转换/批量转换”时，会优先调用它，所以只要你拉到最新版，转换逻辑和我的是同一份代码。
 
 想要“效果和我一样”，关键是你在同一个开关组合下跑：
@@ -186,5 +186,4 @@ $env:DEEPSEEK_API_KEY="你的正确key"
 ```powershell
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
-
 
