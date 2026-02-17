@@ -6490,6 +6490,13 @@ INPUT JSON:
 
 def _parse_args(argv: Optional[list[str]] = None) -> ConvertConfig:
     ap = argparse.ArgumentParser(description="Convert a research PDF into (high-fidelity) Markdown with assets.")
+    ap.add_argument(
+        "--profile",
+        type=str,
+        default="locked",
+        choices=["locked", "custom"],
+        help="Conversion profile: locked (recommended, enforces stable high-quality defaults) or custom (respect current env/flags).",
+    )
     ap.add_argument("--pdf", required=True, help="Input PDF path")
     ap.add_argument("--out", required=True, help="Output folder (paper-stem subfolder will be created)")
     ap.add_argument("--translate-zh", action="store_true", help="Also output Chinese Markdown")
@@ -6556,9 +6563,43 @@ def _parse_args(argv: Optional[list[str]] = None) -> ConvertConfig:
     ap.add_argument("--fast", action="store_true", help="Speed-first mode: lighter image scale and disable expensive fallbacks")
     ap.add_argument("--workers", type=int, default=0, help="Page worker threads for no-LLM mode (0=auto)")
     ap.add_argument("--sleep", type=float, default=0.0, help="Sleep seconds between LLM requests")
-    ap.add_argument("--llm-timeout", type=float, default=float(os.environ.get("DEEPSEEK_TIMEOUT_S", "45")), help="Per-request LLM timeout seconds")
+    ap.add_argument(
+        "--llm-timeout",
+        type=float,
+        default=float(os.environ.get("KB_PDF_LLM_TIMEOUT_S", os.environ.get("DEEPSEEK_TIMEOUT_S", "120"))),
+        help="Per-request LLM timeout seconds",
+    )
     ap.add_argument("--llm-retries", type=int, default=int(os.environ.get("DEEPSEEK_RETRIES", "0")), help="Retries for each LLM request")
     args = ap.parse_args(argv)
+
+    # Stable profile that freezes key guardrails to avoid quality regressions
+    # caused by ad-hoc environment toggles.
+    if str(getattr(args, "profile", "locked") or "locked").strip().lower() == "locked":
+        locked_env = {
+            "KB_PDF_LEGACY_EXTRA_CLEANUP": "0",
+            "KB_PDF_VISION_MATH_QUALITY_GATE": "1",
+            "KB_PDF_VISION_EMPTY_RETRY": "3",
+            "KB_PDF_VISION_EMPTY_RETRY_BACKOFF_S": "1.5",
+            "KB_PDF_VISION_REFS_COLUMN_MODE": "1",
+            "KB_PDF_VISION_FRAGMENT_FALLBACK": "0",
+            "KB_PDF_VISION_FORMULA_OVERLAY": "0",
+        }
+        for k, v in locked_env.items():
+            os.environ[k] = v
+
+        # Keep quality-first route deterministic under locked profile.
+        if str(args.speed_mode).lower() != "normal":
+            print(
+                f"[PROFILE] locked: forcing --speed-mode normal (ignore {args.speed_mode!r})",
+                flush=True,
+            )
+            args.speed_mode = "normal"
+
+        # Timeout guardrail to reduce random mid-run aborts on heavy pages.
+        try:
+            args.llm_timeout = max(120.0, float(args.llm_timeout))
+        except Exception:
+            args.llm_timeout = 120.0
 
     pdf_path = Path(args.pdf).expanduser().resolve()
     out_dir = Path(args.out).expanduser().resolve()
@@ -6706,6 +6747,20 @@ def main() -> None:
         # Get speed mode
         speed_mode = getattr(cfg, 'speed_mode', 'balanced')
         print(f"Speed mode: {speed_mode}", flush=True)
+        try:
+            locked_keys = [
+                "KB_PDF_LEGACY_EXTRA_CLEANUP",
+                "KB_PDF_VISION_MATH_QUALITY_GATE",
+                "KB_PDF_VISION_EMPTY_RETRY",
+                "KB_PDF_VISION_EMPTY_RETRY_BACKOFF_S",
+                "KB_PDF_VISION_REFS_COLUMN_MODE",
+                "KB_PDF_VISION_FRAGMENT_FALLBACK",
+                "KB_PDF_VISION_FORMULA_OVERLAY",
+            ]
+            kv = " ".join([f"{k}={os.environ.get(k, '')}" for k in locked_keys])
+            print(f"[PROFILE] active guardrails: {kv}", flush=True)
+        except Exception:
+            pass
 
         # IMPORTANT: keep parsed cfg fields (workers/llm_workers, llm_repair flags, batch sizes, etc).
         # Previously we rebuilt ConvertConfig with only a subset of fields, silently dropping those knobs.
@@ -6769,7 +6824,14 @@ def main() -> None:
                 output_md.replace(final_md)
                 print(f"  Renamed to: {final_md}", flush=True)
             except Exception as e:
-                print(f"  Skip rename to .en.md ({e}); keep output.md", flush=True)
+                # Fallback: try copy so canonical .en.md still gets refreshed.
+                # This helps when replace() fails due Windows path/locking quirks.
+                try:
+                    import shutil
+                    shutil.copyfile(str(output_md), str(final_md))
+                    print(f"  Rename failed ({e}); copied to: {final_md}", flush=True)
+                except Exception as e2:
+                    print(f"  Skip rename/copy to .en.md ({e2}); keep output.md", flush=True)
         
         if (output_dir / "quality_report.md").exists():
             print(f"  Quality report: {output_dir / 'quality_report.md'}", flush=True)
