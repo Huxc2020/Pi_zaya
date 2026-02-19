@@ -1154,6 +1154,15 @@ body.kb-cite-dragging{
 .kb-cite-pop-add:hover{
   filter: brightness(0.94);
 }
+.kb-cite-pop-add.kb-added{
+  background: color-mix(in srgb, var(--accent) 16%, var(--btn-bg));
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--btn-border));
+  color: var(--text-main);
+}
+.kb-cite-pop-add.kb-added:hover{
+  filter: none;
+  background: color-mix(in srgb, var(--accent) 24%, var(--btn-bg));
+}
 .kb-cite-pop-close{
   position: absolute;
   top: 0;
@@ -1246,6 +1255,21 @@ body.kb-cite-dragging{
   padding: 8px 10px;
   margin-bottom: 8px;
   background: color-mix(in srgb, var(--panel) 86%, var(--bg));
+}
+.kb-cite-shelf-item.kb-flash{
+  animation: kb-shelf-flash 1.25s ease-out 1;
+}
+@keyframes kb-shelf-flash{
+  0%{
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 38%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 65%, var(--line));
+    background: color-mix(in srgb, var(--accent) 16%, var(--panel));
+  }
+  100%{
+    box-shadow: 0 0 0 0 transparent;
+    border-color: var(--line);
+    background: color-mix(in srgb, var(--panel) 86%, var(--bg));
+  }
 }
 .kb-cite-shelf-item-title{
   font-size: 0.84rem;
@@ -2134,10 +2158,11 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
       if (cur && typeof cur === "object") {{
         if (!Array.isArray(cur.items)) cur.items = [];
         if (typeof cur.open !== "boolean") cur.open = false;
+        if (typeof cur.focusKey !== "string") cur.focusKey = "";
         return cur;
       }}
     }} catch (e) {{}}
-    const init = {{ open: false, items: [] }};
+    const init = {{ open: false, items: [], focusKey: "" }};
     try {{ host[SHELF_KEY] = init; }} catch (e) {{}}
     return init;
   }}
@@ -2171,7 +2196,17 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
     const doi = String(payload.doi || "").trim();
     const doiUrl0 = safeUrl(String(payload.doi_url || "").trim());
     const doiUrl = doiUrl0 || (doi ? ("https://doi.org/" + doi) : "");
-    const main = citeFmt || title || raw || "(no reference text)";
+    function stripLeadLabel(s) {{
+      let t = String(s || "").trim();
+      if (!t) return "";
+      for (let i = 0; i < 3; i += 1) {{
+        const t2 = t.replace(/^\s*(?:\[\s*\d{1,4}\s*\]\s*){1,3}/, "").replace(/^\s*\d{1,4}\s*[.)]\s*/, "").trim();
+        if (t2 === t) break;
+        t = t2;
+      }}
+      return t;
+    }}
+    const main = stripLeadLabel(citeFmt || title || raw || "(no reference text)");
     const rec = {{
       num: num,
       source_name: sourceName,
@@ -2190,6 +2225,18 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
     }};
     rec.key = shelfItemKey(rec);
     return rec;
+  }}
+
+  function isShelfItemPresent(itemKey) {{
+    const k = String(itemKey || "");
+    if (!k) return false;
+    const st0 = shelfState();
+    const items = Array.isArray(st0.items) ? st0.items : [];
+    for (const it of items) {{
+      if (!it || typeof it !== "object") continue;
+      if (String(shelfItemKey(it) || "") === k) return true;
+    }}
+    return false;
   }}
 
   function clearCiteDrag() {{
@@ -2312,13 +2359,16 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
         const doi = escapeHtml(String(it.doi || ""));
         const doiUrl = safeUrl(String(it.doi_url || ""));
         const num = Number(it.num || 0);
-        const head = (isFinite(num) && num > 0) ? ("[" + String(num) + "] ") : "";
+        // `num` is numeric, so no escaping is required here.
+        const leadRe = (isFinite(num) && num > 0) ? new RegExp("^\\s*\\[" + String(num) + "\\]\\s*") : null;
+        const main1 = (leadRe ? main.replace(leadRe, "") : main).trim();
+        const head = (isFinite(num) && num > 0 && main1 === main) ? ("[" + String(num) + "] ") : "";
         let sub = "";
         if (sourceName) sub += "source: " + sourceName;
         if (venue) sub += (sub ? " | " : "") + venue;
         if (year) sub += (sub ? " | " : "") + year;
-        htmlParts += '<div class="kb-cite-shelf-item">';
-        htmlParts += '<div class="kb-cite-shelf-item-title">' + head + main + '</div>';
+        htmlParts += '<div class="kb-cite-shelf-item" data-kb-shelf-key="' + escapeHtml(String(it.key || "")) + '">';
+        htmlParts += '<div class="kb-cite-shelf-item-title">' + head + main1 + '</div>';
         if (sub) htmlParts += '<div class="kb-cite-shelf-item-sub">' + sub + '</div>';
         htmlParts += '<div class="kb-cite-shelf-item-links">';
         if (doiUrl) {{
@@ -2329,6 +2379,31 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
         htmlParts += '</div></div>';
       }}
       listEl.innerHTML = htmlParts;
+      const focusKey = String(st0.focusKey || "").trim();
+      if (focusKey) {{
+        st0.focusKey = "";
+        let target = null;
+        try {{
+          const nodes = listEl.querySelectorAll(".kb-cite-shelf-item[data-kb-shelf-key]");
+          for (const nd of nodes) {{
+            if (String(nd.getAttribute("data-kb-shelf-key") || "") === focusKey) {{
+              target = nd;
+              break;
+            }}
+          }}
+        }} catch (e) {{}}
+        if (target) {{
+          try {{ target.scrollIntoView({{ behavior: "smooth", block: "nearest" }}); }} catch (e) {{}}
+          try {{
+            target.classList.remove("kb-flash");
+            void target.offsetWidth;
+            target.classList.add("kb-flash");
+            host.setTimeout(function () {{
+              try {{ target.classList.remove("kb-flash"); }} catch (e) {{}}
+            }}, 1400);
+          }} catch (e) {{}}
+        }}
+      }}
     }} catch (e) {{}}
   }}
 
@@ -2342,19 +2417,28 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
     const item = normalizeShelfItem(payload);
     if (!item) {{
       openCiteShelf();
-      return;
+      return {{ added: false, key: "" }};
     }}
     const st0 = shelfState();
     const cur = Array.isArray(st0.items) ? st0.items.slice() : [];
     const key = String(item.key || "");
-    const next = cur.filter(function (x) {{
-      if (!x || typeof x !== "object") return false;
-      return String(shelfItemKey(x) || "") !== key;
-    }});
-    next.unshift(item);
+    let exists = false;
+    const next = [];
+    for (const x of cur) {{
+      if (!x || typeof x !== "object") continue;
+      if (String(shelfItemKey(x) || "") === key) {{
+        exists = true;
+        next.push(x);
+      }} else {{
+        next.push(x);
+      }}
+    }}
+    if (!exists) next.unshift(item);
     st0.items = next.slice(0, 120);
     st0.open = true;
+    st0.focusKey = key;
     renderCiteShelf();
+    return {{ added: !exists, key: key }};
   }}
 
   function findCitePayload(anchorId) {{
@@ -2372,6 +2456,54 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
           return null;
         }}
       }}
+    }} catch (e) {{}}
+    return null;
+  }}
+
+  function payloadFromAnchorFallback(a, anchorId) {{
+    try {{
+      if (!a) return null;
+      const t = String(a.getAttribute("title") || "").trim();
+      if (!t) return null;
+      const txt = t.replace(/\s+/g, " ").trim();
+      // Typical title format:
+      // "source: X | ref [12] | Title ... | DOI: 10.xxxx/..."
+      const parts = txt.split("|").map(function (x) {{ return String(x || "").trim(); }}).filter(Boolean);
+      let sourceName = "";
+      let num = 0;
+      let doi = "";
+      const mainParts = [];
+      for (const p of parts) {{
+        const low = p.toLowerCase();
+        if (low.startsWith("source:")) {{
+          sourceName = p.slice(7).trim();
+          continue;
+        }}
+        const mRef = p.match(/^ref\s*\[(\d{{1,4}})\]$/i);
+        if (mRef) {{
+          const n0 = Number(mRef[1] || 0);
+          if (isFinite(n0) && n0 > 0) num = Math.floor(n0);
+          continue;
+        }}
+        if (low.startsWith("doi:")) {{
+          doi = p.slice(4).trim();
+          continue;
+        }}
+        mainParts.push(p);
+      }}
+      const main = mainParts.join(" | ").trim();
+      const doiUrl = doi ? ("https://doi.org/" + doi.replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, "")) : "";
+      return {{
+        num: num,
+        source_name: sourceName,
+        title: "",
+        raw: main || txt,
+        venue: "",
+        year: "",
+        doi: doi,
+        doi_url: doiUrl,
+        anchor: String(anchorId || ""),
+      }};
     }} catch (e) {{}}
     return null;
   }}
@@ -2400,12 +2532,22 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
       if (t.length <= maxLen) return t;
       return t.slice(0, Math.max(0, maxLen - 3)).trimEnd() + "...";
     }}
+    function stripLeadLabel(s) {{
+      let t = String(s || "").trim();
+      if (!t) return "";
+      for (let i = 0; i < 3; i += 1) {{
+        const t2 = t.replace(/^\s*(?:\[\s*\d{1,4}\s*\]\s*){1,3}/, "").replace(/^\s*\d{1,4}\s*[.)]\s*/, "").trim();
+        if (t2 === t) break;
+        t = t2;
+      }}
+      return t;
+    }}
 
-    let main = String(citeFmt || "").trim();
+    let main = stripLeadLabel(String(citeFmt || "").trim());
     if (!main) {{
       const segs = [];
-      if (authors) segs.push(authors);
-      if (title) segs.push(title);
+      if (authors) segs.push(stripLeadLabel(authors));
+      if (title) segs.push(stripLeadLabel(title));
       let venueSeg = venue;
       if (volume) {{
         venueSeg += (venueSeg ? ", " : "") + volume;
@@ -2420,12 +2562,17 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
       main = segs.join(". ").trim();
       if (main && !/[.!?]$/.test(main)) main += ".";
     }}
-    if (!main) main = trimLine(raw, 420) || "(no reference text)";
+    if (!main) main = trimLine(stripLeadLabel(raw), 420) || "(no reference text)";
     const subParts = [];
     if (sourceName) subParts.push("source: " + sourceName);
     if (venue) subParts.push(venue);
     if (year) subParts.push(year);
     const sub = subParts.join(" | ");
+
+    const itemForState = normalizeShelfItem(payload);
+    const alreadyInShelf = Boolean(itemForState && isShelfItemPresent(itemForState.key));
+    const addBtnLabel = alreadyInShelf ? "已加入文献篮" : "加入文献篮";
+    const addBtnClass = alreadyInShelf ? "kb-cite-pop-add kb-added" : "kb-cite-pop-add";
 
     const pop = doc.createElement("div");
     pop.className = "kb-cite-pop";
@@ -2441,7 +2588,7 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
         : "") +
       '<div class="kb-cite-pop-actions">' +
       '<button type="button" class="kb-cite-pop-open-shelf">打开文献篮</button>' +
-      '<button type="button" class="kb-cite-pop-add">加入文献篮</button>' +
+      '<button type="button" class="' + addBtnClass + '">' + addBtnLabel + '</button>' +
       '</div>';
 
     doc.body.appendChild(pop);
@@ -2515,6 +2662,7 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
           e.preventDefault();
           e.stopPropagation();
           addToCiteShelf(payload);
+          closeCitePopup();
         }});
       }}
     }} catch (e) {{}}
@@ -2532,7 +2680,7 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
         const href = String(a.getAttribute("href") || "");
         const id = href.startsWith("#") ? href.slice(1) : href;
         if (!id) return;
-        const payload = findCitePayload(id);
+        const payload = findCitePayload(id) || payloadFromAnchorFallback(a, id);
         if (!payload) return;
         e.preventDefault();
         e.stopPropagation();

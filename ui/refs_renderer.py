@@ -700,6 +700,7 @@ _INLINE_MATH_RE = re.compile(r"(\$[^$\n]+\$)")
 
 
 _EQ_TAG_RE = re.compile(r"\\tag\{(\d{1,4})\}")
+_REF_LEAD_LABEL_RE = re.compile(r"^\s*(?:\[\s*\d{1,4}\s*\]\s*){1,3}|^\s*\d{1,4}\s*[.)]\s*")
 
 
 def _collect_source_paths_from_hits(hits: list[dict], *, max_docs: int = 16) -> list[str]:
@@ -773,38 +774,26 @@ def _looks_noisy_reference_title(title: str) -> bool:
     return False
 
 
-def _doi_enrich_meta_cached(doi: str, *, title_hint: str = "") -> dict:
-    d = str(doi or "").strip().lower()
-    if not d:
-        return {}
-    key = "_kb_ref_doi_meta_cache_v1"
-    cache = st.session_state.get(key)
-    if not isinstance(cache, dict):
-        cache = {}
-        st.session_state[key] = cache
-    if d in cache:
-        v = cache.get(d)
-        return v if isinstance(v, dict) else {}
-    try:
-        meta = fetch_best_crossref_meta(
-            query_title=str(title_hint or "").strip(),
-            doi_hint=d,
-            allow_title_only=True,
-            min_score=0.88,
-        )
-        cache[d] = meta if isinstance(meta, dict) else {}
-    except Exception:
-        cache[d] = {}
-    v2 = cache.get(d)
-    return v2 if isinstance(v2, dict) else {}
+def _strip_reference_lead_label(text: str) -> str:
+    s = str(text or "").strip()
+    if not s:
+        return ""
+    t = s
+    # Remove duplicated leading labels like "[50] [50] ...".
+    for _ in range(3):
+        t2 = _REF_LEAD_LABEL_RE.sub("", t).strip()
+        if t2 == t:
+            break
+        t = t2
+    return t
 
 
 def _format_reference_cite_line(ref_rec: dict) -> str:
     if not isinstance(ref_rec, dict):
         return ""
-    authors = str(ref_rec.get("authors") or "").strip()
-    title = str(ref_rec.get("title") or "").strip()
-    venue = str(ref_rec.get("venue") or "").strip()
+    authors = _strip_reference_lead_label(str(ref_rec.get("authors") or "").strip())
+    title = _strip_reference_lead_label(str(ref_rec.get("title") or "").strip())
+    venue = _strip_reference_lead_label(str(ref_rec.get("venue") or "").strip())
     year = str(ref_rec.get("year") or "").strip()
     volume = str(ref_rec.get("volume") or "").strip()
     issue = str(ref_rec.get("issue") or "").strip()
@@ -842,35 +831,19 @@ def _normalize_reference_for_popup(ref_rec: dict) -> dict:
         return {}
     out = dict(ref_rec)
     doi = str(out.get("doi") or "").strip()
-    title = str(out.get("title") or "").strip()
-    authors = str(out.get("authors") or "").strip()
-    venue = str(out.get("venue") or "").strip()
+    title = _strip_reference_lead_label(str(out.get("title") or "").strip())
+    authors = _strip_reference_lead_label(str(out.get("authors") or "").strip())
+    venue = _strip_reference_lead_label(str(out.get("venue") or "").strip())
     year = str(out.get("year") or "").strip()
     volume = str(out.get("volume") or "").strip()
     issue = str(out.get("issue") or "").strip()
     pages = str(out.get("pages") or "").strip()
+    raw = _strip_reference_lead_label(str(out.get("raw") or "").strip())
 
-    noisy_title = _looks_noisy_reference_title(title)
-    need_enrich = bool(doi and ((not authors) or (not venue) or noisy_title or (not year) or ((not volume) and (not pages))))
-    if need_enrich:
-        meta = _doi_enrich_meta_cached(doi, title_hint=("" if noisy_title else title))
-        if isinstance(meta, dict) and meta:
-            if noisy_title or (not title):
-                title = str(meta.get("title") or title).strip()
-            if not authors:
-                authors = str(meta.get("authors") or authors).strip()
-            if not venue:
-                venue = str(meta.get("venue") or venue).strip()
-            if not year:
-                year = str(meta.get("year") or year).strip()
-            if not volume:
-                volume = str(meta.get("volume") or volume).strip()
-            if not issue:
-                issue = str(meta.get("issue") or issue).strip()
-            if not pages:
-                pages = str(meta.get("pages") or pages).strip()
-            if not doi:
-                doi = str(meta.get("doi") or doi).strip()
+    # Avoid network calls in render path. Rendering should stay local/non-blocking.
+    # DOI enrichment is handled during reference-index build/update.
+    if (not doi) and raw:
+        doi = str(extract_first_doi(raw) or "").strip()
 
     out["title"] = title
     out["authors"] = authors
@@ -880,6 +853,7 @@ def _normalize_reference_for_popup(ref_rec: dict) -> dict:
     out["issue"] = issue
     out["pages"] = pages
     out["doi"] = doi
+    out["raw"] = raw
     out["cite_fmt"] = _format_reference_cite_line(out)
     return out
 
