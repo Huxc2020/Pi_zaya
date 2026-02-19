@@ -13,6 +13,11 @@ from urllib.parse import quote
 import streamlit as st
 
 from kb.citation_meta import extract_first_doi, fetch_best_crossref_meta
+from kb.reference_index import (
+    extract_references_map_from_md as _extract_references_map_from_md_index,
+    load_reference_index as _load_reference_index_file,
+    resolve_reference_entry as _resolve_reference_entry_from_index,
+)
 from kb.pdf_tools import open_in_explorer
 from ui.strings import S
 import json
@@ -686,9 +691,356 @@ def _render_refs(
 # --- In-paper citation number resolver (e.g., "[45]" in body text) ---
 
 _INPAPER_CITE_RE = re.compile(r"\[(\d{1,4})\]")
+_INPAPER_CITE_GROUP_RE = re.compile(r"\[(\d{1,4}(?:\s*(?:-|–|—|,)\s*\d{1,4})+)\]")
+_INPAPER_CITE_ANY_RE = re.compile(r"\[(\d{1,4}(?:\s*(?:-|–|—|,)\s*\d{1,4})*)\]")
+_STRUCT_CITE_RE = re.compile(r"\[\[\s*CITE\s*:\s*([A-Za-z0-9_-]{4,24})\s*:\s*(\d{1,4})\s*\]\]", re.IGNORECASE)
+_CODE_FENCE_LINE_RE = re.compile(r"^\s*```")
+_INLINE_CODE_RE = re.compile(r"(`[^`]*`)")
+_INLINE_MATH_RE = re.compile(r"(\$[^$\n]+\$)")
 
 
 _EQ_TAG_RE = re.compile(r"\\tag\{(\d{1,4})\}")
+
+
+def _collect_source_paths_from_hits(hits: list[dict], *, max_docs: int = 16) -> list[str]:
+    out: list[str] = []
+    for h in hits or []:
+        meta = h.get("meta", {}) or {}
+        sp = str(meta.get("source_path") or "").strip()
+        if not sp or _is_temp_source_path(sp):
+            continue
+        if sp in out:
+            continue
+        out.append(sp)
+        if len(out) >= int(max_docs):
+            break
+    return out
+
+
+def _load_reference_index_cached() -> dict:
+    db_dir_str = str(st.session_state.get("db_dir") or "").strip()
+    if not db_dir_str:
+        return {}
+    db_dir = Path(db_dir_str)
+    idx_path = db_dir / "references_index.json"
+    if not idx_path.exists():
+        return {}
+
+    try:
+        idx_sig = f"{str(idx_path.resolve())}|{int(idx_path.stat().st_mtime)}|{int(idx_path.stat().st_size)}"
+    except Exception:
+        idx_sig = str(idx_path)
+
+    cache_key = "_kb_ref_index_cache_v1"
+    cache = st.session_state.get(cache_key)
+    if isinstance(cache, dict) and str(cache.get("sig") or "") == idx_sig and isinstance(cache.get("data"), dict):
+        return cache.get("data") or {}
+
+    data = _load_reference_index_file(db_dir)
+    st.session_state[cache_key] = {"sig": idx_sig, "data": data}
+    return data if isinstance(data, dict) else {}
+
+
+def _citation_hover_title(source_name: str, ref_num: int, ref_rec: dict) -> str:
+    src = str(source_name or "").strip()
+    title = str(ref_rec.get("title") or "").strip()
+    doi = str(ref_rec.get("doi") or "").strip()
+    parts = [f"source: {src}", f"ref [{int(ref_num)}]"]
+    if title:
+        parts.append(title)
+    if doi:
+        parts.append(f"DOI: {doi}")
+    txt = " | ".join(parts)
+    txt = txt.replace('"', "'").replace("\n", " ").strip()
+    if len(txt) > 260:
+        txt = txt[:257].rstrip() + "..."
+    return txt
+
+
+def _anchor_token(text: str) -> str:
+    s = str(text or "").strip()
+    if not s:
+        return "global"
+    return hashlib.sha1(s.encode("utf-8", "ignore")).hexdigest()[:10]
+
+
+def _build_inpaper_anchor(anchor_ns: str, ref_num: int, source_name: str = "") -> str:
+    base = f"{str(anchor_ns or '').strip()}|{int(ref_num)}|{str(source_name or '').strip().lower()}"
+    sig = _anchor_token(base)
+    return f"kb-cite-{sig}-{int(ref_num)}"
+
+
+def _source_cite_id(source_path: str) -> str:
+    s = str(source_path or "").strip()
+    if not s:
+        return "s0000000"
+    return "s" + hashlib.sha1(s.encode("utf-8", "ignore")).hexdigest()[:8]
+
+
+def _ref_doi_url(ref_rec: dict) -> str:
+    if not isinstance(ref_rec, dict):
+        return ""
+    u = str(ref_rec.get("doi_url") or "").strip()
+    if u:
+        return u
+    d = str(ref_rec.get("doi") or "").strip()
+    if d:
+        return f"https://doi.org/{d}"
+    return ""
+
+
+def _annotate_inpaper_citations_with_hover_meta(
+    md: str,
+    hits: list[dict],
+    *,
+    anchor_ns: str = "",
+) -> tuple[str, list[dict]]:
+    s = (md or "")
+    if not s or "[" not in s:
+        return s, []
+
+    srcs = _collect_source_paths_from_hits(hits or [], max_docs=16)
+    if not srcs:
+        return s, []
+    sid_to_source: dict[str, str] = {}
+    for sp in srcs:
+        sid = _source_cite_id(sp).lower()
+        sid_to_source[sid] = sp
+
+    index_data = _load_reference_index_cached()
+    if not isinstance(index_data, dict):
+        index_data = {}
+
+    resolved_cache: dict[tuple[int, str], tuple[str, dict] | None] = {}
+    detail_by_key: dict[str, dict] = {}
+
+    def _resolve_num(n: int, preferred_sp: str = "") -> tuple[str, dict] | None:
+        pref = str(preferred_sp or "").strip()
+        ckey = (int(n), pref.lower())
+        if ckey in resolved_cache:
+            return resolved_cache[ckey]
+        matches: list[tuple[str, dict]] = []
+        ordered_srcs = list(srcs)
+        if pref and pref in ordered_srcs:
+            ordered_srcs = [pref] + [x for x in ordered_srcs if x != pref]
+        for sp in ordered_srcs:
+            got = _resolve_reference_entry_from_index(index_data, sp, n)
+            if isinstance(got, dict):
+                ref = got.get("ref")
+                if isinstance(ref, dict):
+                    src_name = str(got.get("source_name") or _display_source_name(sp)).strip()
+                    matches.append((src_name, ref))
+
+        picked: tuple[str, dict] | None = None
+        if matches:
+            if pref:
+                # Preferred source is already first due reordering.
+                picked = matches[0]
+            elif len(matches) == 1:
+                picked = matches[0]
+            else:
+                # Ambiguous across multiple source docs: do not force-pick the first one.
+                picked = None
+        resolved_cache[ckey] = picked
+        return picked
+
+    def _remember_detail(n: int, source_name: str, ref: dict) -> dict:
+        skey = f"{int(n)}|{str(source_name or '').strip().lower()}"
+        rec = detail_by_key.get(skey)
+        if isinstance(rec, dict):
+            return rec
+        raw_text = str(ref.get("raw") or "").strip()
+        doi_text = str(ref.get("doi") or "").strip()
+        if (not doi_text) and raw_text:
+            doi_text = str(extract_first_doi(raw_text) or "").strip()
+        doi_url = str(ref.get("doi_url") or "").strip()
+        if (not doi_url) and doi_text:
+            doi_url = f"https://doi.org/{doi_text}"
+        anchor = _build_inpaper_anchor(anchor_ns, int(n), source_name=source_name)
+        rec = {
+            "num": int(n),
+            "anchor": anchor,
+            "source_name": str(source_name or "").strip(),
+            "raw": raw_text,
+            "title": str(ref.get("title") or "").strip(),
+            "authors": str(ref.get("authors") or "").strip(),
+            "venue": str(ref.get("venue") or "").strip(),
+            "year": str(ref.get("year") or "").strip(),
+            "doi": doi_text,
+            "doi_url": doi_url,
+        }
+        detail_by_key[skey] = rec
+        return rec
+
+    def _replace_text_segment(seg: str) -> str:
+        structured_seen = False
+
+        def _preferred_source_by_context(pos: int) -> str:
+            try:
+                left = seg[max(0, int(pos) - 160) : int(pos)]
+            except Exception:
+                left = seg
+            # Heuristic: nearest low-number marker like [1]/[2] often denotes KB source id.
+            markers = list(re.finditer(r"\[(\d{1,2})\]", left))
+            if not markers:
+                return ""
+            for mm in reversed(markers):
+                try:
+                    k = int(mm.group(1))
+                except Exception:
+                    continue
+                if 1 <= k <= len(srcs):
+                    return str(srcs[k - 1])
+            return ""
+
+        def _mk_cite_link_md(n: int, detail: dict, title_attr: str) -> str:
+            anchor = str(detail.get("anchor") or "").strip()
+            t_attr = str(title_attr or "").replace('"', "'").replace("\n", " ").strip()
+            return f"[{int(n)}](#{anchor} \"{t_attr}\")"
+
+        def _repl_struct(m: re.Match) -> str:
+            nonlocal structured_seen
+            structured_seen = True
+            sid = str(m.group(1) or "").strip().lower()
+            try:
+                n = int(m.group(2))
+            except Exception:
+                return str(m.group(0) or "")
+            sp = sid_to_source.get(sid) or sid_to_source.get(sid.lower())
+            if not sp:
+                # Keep visible reference number even if sid cannot be mapped.
+                return f"[{int(n)}]"
+            got = _resolve_reference_entry_from_index(index_data, sp, int(n))
+            if not isinstance(got, dict):
+                return f"[{int(n)}]"
+            ref = got.get("ref")
+            if not isinstance(ref, dict):
+                return f"[{int(n)}]"
+            src_name = str(got.get("source_name") or _display_source_name(sp)).strip()
+            detail = _remember_detail(int(n), src_name, ref)
+            title_attr = _citation_hover_title(src_name, int(n), ref)
+            return _mk_cite_link_md(int(n), detail, title_attr)
+
+        def _repl_any(m: re.Match) -> str:
+            raw = str(m.group(0) or "")
+            spec = str(m.group(1) or "").strip()
+            nums = _parse_int_set(spec)[:40]
+            if not nums:
+                return raw
+            pref_sp = _preferred_source_by_context(int(m.start()))
+            items: list[str] = []
+            changed = False
+            for n in nums:
+                picked = _resolve_num(int(n), preferred_sp=pref_sp)
+                if not picked:
+                    items.append(f"[{int(n)}]")
+                    continue
+                src_name, ref = picked
+                detail = _remember_detail(int(n), src_name, ref)
+                title_attr = _citation_hover_title(src_name, int(n), ref)
+                items.append(_mk_cite_link_md(int(n), detail, title_attr))
+                changed = True
+            if not changed:
+                return raw
+            return "".join(items)
+
+        seg2 = _STRUCT_CITE_RE.sub(_repl_struct, seg)
+        if structured_seen:
+            return seg2
+        return _INPAPER_CITE_ANY_RE.sub(_repl_any, seg2)
+
+    out_lines: list[str] = []
+    in_fence = False
+    in_display_math = False
+    for ln in s.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if _CODE_FENCE_LINE_RE.match(ln):
+            in_fence = not in_fence
+            out_lines.append(ln)
+            continue
+        if in_fence:
+            out_lines.append(ln)
+            continue
+        if ln.strip() == "$$":
+            in_display_math = not in_display_math
+            out_lines.append(ln)
+            continue
+        if in_display_math:
+            out_lines.append(ln)
+            continue
+
+        st_ln = (ln or "").strip()
+        is_table_row = (st_ln.startswith("|") and st_ln.count("|") >= 2)
+        is_table_sep = bool(re.match(r"^\s*\|?(?:\s*:?-{2,}:?\s*\|)+\s*:?-{2,}:?\s*\|?\s*$", st_ln))
+        if is_table_row or is_table_sep:
+            out_lines.append(ln)
+            continue
+
+        code_parts = _INLINE_CODE_RE.split(ln)
+        rebuilt_code: list[str] = []
+        for i, cp in enumerate(code_parts):
+            if i % 2 == 1:
+                rebuilt_code.append(cp)
+                continue
+            math_parts = _INLINE_MATH_RE.split(cp)
+            rebuilt_math: list[str] = []
+            for j, mp in enumerate(math_parts):
+                if j % 2 == 1:
+                    rebuilt_math.append(mp)
+                else:
+                    rebuilt_math.append(_replace_text_segment(mp))
+            rebuilt_code.append("".join(rebuilt_math))
+        out_lines.append("".join(rebuilt_code))
+
+    details = sorted(detail_by_key.values(), key=lambda x: (int(x.get("num") or 0), str(x.get("source_name") or "")))
+    return "\n".join(out_lines), details
+
+
+def _annotate_inpaper_citations_with_hover(md: str, hits: list[dict]) -> str:
+    out, _ = _annotate_inpaper_citations_with_hover_meta(md, hits, anchor_ns="")
+    return out
+
+
+def _render_inpaper_citation_details(
+    cite_details: list[dict],
+    *,
+    key_ns: str,
+    max_items: int = 24,
+) -> None:
+    del key_ns
+    if not isinstance(cite_details, list) or not cite_details:
+        return
+
+    shown = [x for x in cite_details if isinstance(x, dict)]
+    if not shown:
+        return
+    shown = sorted(shown, key=lambda x: int(x.get("num") or 0))[: int(max(1, max_items))]
+    html_parts: list[str] = ["<div class='kb-cite-data-wrap' style='display:none'>"]
+    for rec in shown:
+        n = int(rec.get("num") or 0)
+        if n <= 0:
+            continue
+        anchor = str(rec.get("anchor") or "").strip()
+        if not anchor:
+            continue
+        payload = {
+            "num": int(n),
+            "source_name": str(rec.get("source_name") or "").strip(),
+            "raw": str(rec.get("raw") or "").strip(),
+            "title": str(rec.get("title") or "").strip(),
+            "authors": str(rec.get("authors") or "").strip(),
+            "venue": str(rec.get("venue") or "").strip(),
+            "year": str(rec.get("year") or "").strip(),
+            "doi": str(rec.get("doi") or "").strip(),
+            "doi_url": str(rec.get("doi_url") or "").strip(),
+        }
+        payload_s = html.escape(json.dumps(payload, ensure_ascii=False), quote=True)
+        html_parts.append(
+            "<div class='kb-cite-data' "
+            f"data-kb-cite='{html.escape(anchor, quote=True)}' "
+            f"data-kb-payload=\"{payload_s}\"></div>"
+        )
+    html_parts.append("</div>")
+    st.markdown("".join(html_parts), unsafe_allow_html=True)
 
 
 def _iter_display_math_blocks(md: str) -> list[tuple[int, int, str]]:
@@ -864,7 +1216,7 @@ def _annotate_equation_tags_with_sources(md: str, hits: list[dict]) -> str:
     return "\n".join(out)
 
 
-def _extract_inpaper_cite_numbers(text: str, *, min_n: int = 10, max_n: int = 9999) -> list[int]:
+def _extract_inpaper_cite_numbers(text: str, *, min_n: int = 1, max_n: int = 9999) -> list[int]:
     s = str(text or "")
     if not s:
         return []
@@ -947,67 +1299,7 @@ def _read_text_tail(path: Path, *, max_bytes: int = 1_200_000) -> str:
 
 
 def _extract_references_map_from_md(md_text: str) -> dict[int, str]:
-    """
-    Extract numbered references from a converted Markdown doc:
-    - Find "## References" (or similar)
-    - Parse entries starting with "[n] ..."
-    - Merge wrapped continuation lines
-    """
-    md = (md_text or "").replace("\r\n", "\n").replace("\r", "\n")
-    if not md.strip():
-        return {}
-    lines = md.split("\n")
-    ref_i = None
-    for i, ln in enumerate(lines):
-        if re.match(r"^#{1,6}\s+(References|Bibliography)\b", (ln or "").strip(), re.IGNORECASE):
-            ref_i = i
-            break
-    if ref_i is None:
-        return {}
-
-    tail = lines[ref_i + 1 :]
-    start_re = re.compile(r"^\[(\d+)\]\s+(.*\S)?\s*$")
-    cur_n: int | None = None
-    cur_buf: list[str] = []
-    out: dict[int, str] = {}
-
-    def _flush():
-        nonlocal cur_n, cur_buf
-        if cur_n is None:
-            cur_buf = []
-            return
-        merged = " ".join(x.strip() for x in cur_buf if str(x or "").strip()).strip()
-        if merged:
-            out[int(cur_n)] = merged
-        cur_n = None
-        cur_buf = []
-
-    for raw in tail:
-        s = (raw or "").strip()
-        if not s:
-            continue
-        # Stop when reaching a new major section (rare but happens in some conversions)
-        if re.match(r"^#{1,6}\s+\S+", s) and ("references" not in s.lower()) and ("bibliography" not in s.lower()):
-            # Only stop if we have already collected some refs
-            if out:
-                break
-        m = start_re.match(s)
-        if m:
-            _flush()
-            try:
-                cur_n = int(m.group(1))
-            except Exception:
-                cur_n = None
-                continue
-            rest = (m.group(2) or "").strip()
-            cur_buf = [f"[{cur_n}] {rest}".strip()] if rest else [f"[{cur_n}]".strip()]
-            continue
-        # Continuation line
-        if cur_n is not None:
-            cur_buf.append(s)
-
-    _flush()
-    return out
+    return _extract_references_map_from_md_index(md_text)
 
 
 def _load_references_map_for_source(source_path: str) -> dict[int, str]:
@@ -1043,7 +1335,7 @@ def _render_inpaper_citation_resolver(
     if not srcs:
         return
 
-    cited = _extract_inpaper_cite_numbers(assistant_text or "", min_n=10)
+    cited = _extract_inpaper_cite_numbers(assistant_text or "", min_n=1)
     if not cited:
         return
 
@@ -1058,7 +1350,7 @@ def _render_inpaper_citation_resolver(
     if not is_open:
         return
 
-    st.caption("提示：这里解析的是原文里的 [10+] 这类引用编号（例如 [45]），用于反查 References 列表。")
+    st.caption("提示：这里解析的是原文里的 [n] 引用编号（例如 [45]），用于反查 References 列表。")
 
     # Select a source doc to resolve against
     labels = [_display_source_name(s) for s in srcs]

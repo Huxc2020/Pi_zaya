@@ -127,9 +127,32 @@ def _normalize_math_markdown(text: str) -> str:
 
     s = text
 
-    # Prefer $...$ and $$...$$ over \( \) and \[ \]
-    s = s.replace("\\(", "$").replace("\\)", "$")
-    s = s.replace("\\[", "$$").replace("\\]", "$$")
+    # Prefer $...$ and $$...$$ over \( \) and \[ \], but do it conservatively.
+    # Avoid touching escaped citation brackets like \[24\].
+    def _inline_math_repl(m: re.Match) -> str:
+        inner = str(m.group(1) or "")
+        return f"${inner}$"
+
+    def _display_math_repl(m: re.Match) -> str:
+        inner = str(m.group(1) or "")
+        probe = inner.strip()
+        # Keep citation-like escaped brackets untouched.
+        if re.fullmatch(r"\d{1,4}(?:\s*[,;，、-]\s*\d{1,4})*", probe):
+            return m.group(0)
+        # Convert only when it reasonably looks like math/display content.
+        looks_math = bool(
+            ("\n" in inner)
+            or re.search(
+                r"[=^_{}]|\\(?:frac|sum|int|prod|sqrt|mathbf|mathbb|left|right|begin|end|alpha|beta|gamma|theta|lambda|cdot|times)",
+                inner,
+            )
+        )
+        if not looks_math:
+            return m.group(0)
+        return "$$" + inner + "$$"
+
+    s = re.sub(r"\\\((.+?)\\\)", _inline_math_repl, s, flags=re.DOTALL)
+    s = re.sub(r"\\\[(.+?)\\\]", _display_math_repl, s, flags=re.DOTALL)
 
     # Unwrap math that was mistakenly put in code spans.
     s = re.sub(r"`(\$[^`]+?\$)`", r"\1", s)

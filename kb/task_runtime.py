@@ -57,6 +57,13 @@ if not hasattr(RUNTIME, "BG_STATE"):
 _BG_STATE = RUNTIME.BG_STATE
 _BG_LOCK = RUNTIME.BG_LOCK
 
+
+def _cite_source_id(source_path: str) -> str:
+    s = str(source_path or "").strip()
+    if not s:
+        return "s0000000"
+    return "s" + hashlib.sha1(s.encode("utf-8", "ignore")).hexdigest()[:8]
+
 def _live_assistant_text(task_id: str) -> str:
     return f"{_LIVE_ASSISTANT_PREFIX}{str(task_id or '').strip()}"
 
@@ -259,7 +266,8 @@ def _gen_worker(session_id: str, task_id: str) -> None:
             src_name = Path(src).name if src else ""
             top = meta.get("top_heading") or _top_heading(meta.get("heading_path", ""))
             top = "" if _is_probably_bad_heading(top) else top
-            header = f"[{i}] {src_name or 'unknown'}" + (f" | {top}" if top else "")
+            sid = _cite_source_id(src)
+            header = f"[{i}] [SID:{sid}] {src_name or 'unknown'}" + (f" | {top}" if top else "")
             body = h.get("text", "") or ""
             ctx_parts.append(header + "\n" + body)
 
@@ -324,6 +332,13 @@ def _gen_worker(session_id: str, task_id: str) -> None:
             "3) 不要编造不存在的论文、公式、数据或结论。\n"
             "4) 不要输出‘参考定位/Top-K/引用列表’之类的额外段落（我会在页面里单独展示）。\n"
             "5) 数学公式输出格式：短的变量/符号用 $...$（行内）；较长的等式/推导用 $$...$$（行间）。不要用反引号包裹公式。\n"
+        )
+        system += (
+            "\nStructured citation protocol:\n"
+            "- Context headers contain [SID:<sid>] identifiers.\n"
+            "- When citing paper references, MUST use [[CITE:<sid>:<ref_num>]].\n"
+            "- Example: [[CITE:s1a2b3c4:24]] or [[CITE:s1a2b3c4:24]][[CITE:s1a2b3c4:25]].\n"
+            "- Do NOT output free-form numeric citations like [24] / [2][4].\n"
         )
         user = f"问题：\n{prompt}\n\n检索片段（含深读补充定位）：\n{ctx if ctx else '(无)'}\n"
         history = chat_store.get_messages(conv_id)
@@ -461,8 +476,8 @@ def _bg_worker_loop() -> None:
         replace = bool(task.get("replace", False))
         speed_mode = str(task.get("speed_mode", "balanced"))
         if speed_mode == "ultra_fast":
-            # Enforce latency-first behavior in ultra_fast profile.
-            no_llm = True
+            # Keep VL/LLM path in ultra_fast; converter itself handles speed/quality tradeoff.
+            # Forcing no_llm here causes a dramatic quality drop that does not match UI semantics.
             eq_image_fallback = False
         task_id = str(task.get("_tid") or "")
 
@@ -533,14 +548,14 @@ def _bg_ensure_started() -> None:
     t = getattr(RUNTIME, "BG_THREAD", None)
     running_ver = str(getattr(RUNTIME, "BG_WORKER_VERSION", "") or "")
     if t is not None and t.is_alive():
-        if running_ver == worker_ver:
-            return
-        # Streamlit reruns can keep an old daemon thread alive.
-        # Ask the old worker to cancel, then start a fresh one with new code.
-        _bg_cancel_all()
-        deadline = time.time() + 8.0
-        while t.is_alive() and time.time() < deadline:
-            time.sleep(0.2)
+        # Never interrupt an active conversion thread on app rerun/hot-reload.
+        # Otherwise users observe "sudden stop" in the middle of conversion.
+        if running_ver != worker_ver:
+            try:
+                RUNTIME.BG_WORKER_VERSION = worker_ver
+            except Exception:
+                pass
+        return
     t = threading.Thread(target=_bg_worker_loop, daemon=True)
     RUNTIME.BG_THREAD = t
     RUNTIME.BG_WORKER_VERSION = worker_ver
@@ -557,13 +572,14 @@ def _build_bg_task(
 ) -> dict:
     pdf = Path(pdf_path)
     mode = str(speed_mode)
-    ultra_fast = (mode == "ultra_fast")
     return {
         "_tid": uuid.uuid4().hex,
         "pdf": str(pdf),
         "out_root": str(out_root),
         "db_dir": str(db_dir),
-        "no_llm": bool(no_llm or ultra_fast),
+        # no_llm is controlled only by user-selected mode "no_llm".
+        # ultra_fast should remain VL-based (lower quality, but still LLM).
+        "no_llm": bool(no_llm),
         # Default OFF across all normal modes; enable only explicitly.
         # In no-LLM runs we still force-enable it inside `run_pdf_to_md` for fidelity.
         "eq_image_fallback": False,

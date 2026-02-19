@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 
@@ -177,24 +177,10 @@ div[data-testid="stToolbar"] button,
 div[data-testid="stStatusWidget"] *{
   color: var(--text-soft) !important;
 }
-[data-stale="true"]{
-  opacity: 1 !important;
-  visibility: visible !important;
-  pointer-events: none !important;
-  filter: none !important;
-  transition: none !important;
-}
 body.kb-live-streaming [data-testid="stAppViewContainer"],
 body.kb-live-streaming [data-testid="stAppViewContainer"]{
   opacity: 1 !important;
   filter: none !important;
-}
-body.kb-live-streaming [data-stale="true"]{
-  opacity: 1 !important;
-  visibility: visible !important;
-  pointer-events: none !important;
-  filter: none !important;
-  transition: none !important;
 }
 body.kb-resizing [data-testid="stAppViewContainer"],
 body.kb-resizing [data-testid="stAppViewContainer"]{
@@ -203,13 +189,6 @@ body.kb-resizing [data-testid="stAppViewContainer"]{
 }
 body.kb-resizing [data-testid="stAppViewContainer"] *{
   filter: none !important;
-}
-body.kb-resizing [data-stale="true"]{
-  opacity: 1 !important;
-  visibility: visible !important;
-  pointer-events: none !important;
-  filter: none !important;
-  transition: none !important;
 }
 body.kb-resizing section[data-testid="stSidebar"]{
   background: var(--sidebar-bg) !important;
@@ -246,7 +225,7 @@ section[data-testid="stSidebar"] > div > div{
 }
 section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] button,
 section[data-testid="stSidebar"] [data-testid="stSidebarNav"] button[aria-label*="Close"],
-section[data-testid="stSidebar"] [data-testid="stSidebarNav"] button[aria-label*="关闭"]{
+section[data-testid="stSidebar"] [data-testid="stSidebarNav"] button[aria-label*="鍏抽棴"]{
   width: 34px !important;
   min-width: 34px !important;
   height: 34px !important;
@@ -265,35 +244,35 @@ section[data-testid="stSidebar"] [data-testid="stSidebarNav"] button[aria-label*
 }
 section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] button:hover,
 section[data-testid="stSidebar"] [data-testid="stSidebarNav"] button[aria-label*="Close"]:hover,
-section[data-testid="stSidebar"] [data-testid="stSidebarNav"] button[aria-label*="关闭"]:hover{
+section[data-testid="stSidebar"] [data-testid="stSidebarNav"] button[aria-label*="鍏抽棴"]:hover{
   background: var(--btn-hover) !important;
   border-color: var(--blue-line) !important;
   transform: none !important;
 }
 section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] button:active,
 section[data-testid="stSidebar"] [data-testid="stSidebarNav"] button[aria-label*="Close"]:active,
-section[data-testid="stSidebar"] [data-testid="stSidebarNav"] button[aria-label*="关闭"]:active{
+section[data-testid="stSidebar"] [data-testid="stSidebarNav"] button[aria-label*="鍏抽棴"]:active{
   background: var(--btn-active) !important;
   border-color: var(--blue-line) !important;
   transform: none !important;
 }
 section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] button svg,
 section[data-testid="stSidebar"] [data-testid="stSidebarNav"] button[aria-label*="Close"] svg,
-section[data-testid="stSidebar"] [data-testid="stSidebarNav"] button[aria-label*="关闭"] svg,
+section[data-testid="stSidebar"] [data-testid="stSidebarNav"] button[aria-label*="鍏抽棴"] svg,
 section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] button [data-testid="stIcon"],
 section[data-testid="stSidebar"] [data-testid="stSidebarNav"] button[aria-label*="Close"] [data-testid="stIcon"],
-section[data-testid="stSidebar"] [data-testid="stSidebarNav"] button[aria-label*="关闭"] [data-testid="stIcon"]{
+section[data-testid="stSidebar"] [data-testid="stSidebarNav"] button[aria-label*="鍏抽棴"] [data-testid="stIcon"]{
   display: none !important;
 }
 section[data-testid="stSidebar"] .kb-close-glyph{
   display: inline-flex !important;
   align-items: center !important;
   justify-content: center !important;
-  font-size: 24px !important;
+  font-size: 22px !important;
   line-height: 1 !important;
-  font-weight: 500 !important;
+  font-weight: 600 !important;
   color: var(--text-main) !important;
-  transform: translateY(-1px);
+  transform: translate(-1px, -1px);
   pointer-events: none !important;
 }
 section[data-testid="stSidebar"] label,
@@ -465,10 +444,12 @@ button[kind]{
   background: var(--btn-bg) !important;
   border: 1px solid var(--btn-border) !important;
   color: var(--btn-text) !important;
-  border-radius: 12px !important;
-  padding: 0.44rem 0.88rem !important;
+  border-radius: 10px !important;
+  padding: 0.38rem 0.72rem !important;
   font-weight: 620 !important;
+  font-size: 0.85rem !important;
   box-shadow: 0 1px 0 rgba(16, 24, 40, 0.03);
+  transition: all 0.15s ease !important;
 }
 section[data-testid="stSidebar"] div.stButton > button{ width: 100%; }
 div.stButton > button:hover,
@@ -788,25 +769,40 @@ div[data-testid="stCode"] *::after,
   padding: 0.55rem 0.62rem 0.50rem 0.62rem;
   margin: 0.16rem 0 0.34rem 0;
 }
+.ref-item-compact{
+  background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.00));
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.48rem 0.58rem;
+  margin: 0.12rem 0 0.28rem 0;
+}
 .ref-item-top{
   display: flex;
   align-items: center;
   gap: 0.42rem;
   min-width: 0;
 }
+.ref-item-header{
+  display: flex;
+  align-items: center;
+  gap: 0.52rem;
+  min-width: 0;
+  flex-wrap: wrap;
+}
 .ref-rank{
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 2.25rem;
-  height: 1.35rem;
-  padding: 0 0.40rem;
+  min-width: 2.0rem;
+  height: 1.28rem;
+  padding: 0 0.36rem;
   border-radius: 999px;
-  font-size: 0.76rem;
+  font-size: 0.72rem;
   font-weight: 700;
   color: var(--accent) !important;
   border: 1px solid var(--blue-line);
   background: var(--blue-weak);
+  flex-shrink: 0;
 }
 .ref-source{
   flex: 1 1 auto;
@@ -818,27 +814,47 @@ div[data-testid="stCode"] *::after,
   font-weight: 620;
   letter-spacing: 0.01em;
 }
+.ref-source-compact{
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-main) !important;
+  font-weight: 620;
+  letter-spacing: 0.01em;
+  font-size: 0.90rem;
+  margin-right: 0.1.5rem;
+}
+.ref-actions-compact{
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  flex-shrink: 0;
+}
 .ref-chip{
   display: inline-flex;
   align-items: center;
-  height: 1.35rem;
-  padding: 0 0.46rem;
+  height: 1.28rem;
+  padding: 0 0.42rem;
   border-radius: 999px;
-  font-size: 0.74rem;
+  font-size: 0.70rem;
   font-weight: 640;
   color: var(--text-soft) !important;
   border: 1px solid var(--line);
   background: rgba(148, 163, 184, 0.12);
+  flex-shrink: 0;
 }
 .ref-score{
   display: inline-flex;
   align-items: center;
-  height: 1.35rem;
-  padding: 0 0.48rem;
+  height: 1.28rem;
+  padding: 0 0.44rem;
   border-radius: 999px;
-  font-size: 0.74rem;
+  font-size: 0.70rem;
   font-weight: 700;
   border: 1px solid transparent;
+  flex-shrink: 0;
 }
 .ref-score-hi{
   color: #22c55e !important;
@@ -863,7 +879,42 @@ div[data-testid="stCode"] *::after,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.ref-item-sub-compact{
+  margin-top: 0.00rem;
+  font-size: 0.80rem;
+  color: var(--text-soft) !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: normal;
+  line-height: 1.35;
+  opacity: 0.85;
+}
 .ref-item-gap{ height: 0.26rem; }
+.ref-item-gap-compact{ height: 0.20rem; }
+.citation-loading{
+  font-size: 0.80rem;
+  color: var(--text-soft) !important;
+  margin: 0.20rem 0 0.30rem 0;
+  opacity: 0.75;
+}
+.snipbox-compact{
+  background: var(--snip-bg);
+  border: 1px solid var(--snip-border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  margin: 0.28rem 0 0.40rem 0;
+}
+.snipbox-compact pre{
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--snip-text) !important;
+  background: transparent !important;
+  border: none !important;
+  border-radius: 0 !important;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
 .hr{ height: 1px; background: var(--line); margin: 1rem 0; }
 .pill{
   display: inline-flex;
@@ -1020,6 +1071,84 @@ div[data-testid="stCode"] *::after,
 .msg-refs div[data-testid="stButton"] > button:disabled{
   opacity: 0.50 !important;
 }
+.kb-cite-pop{
+  position: fixed;
+  z-index: 10080;
+  max-width: min(460px, calc(100vw - 24px));
+  min-width: min(280px, calc(100vw - 24px));
+  background: var(--panel);
+  color: var(--text-main) !important;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.24);
+  padding: 10px 12px;
+}
+.kb-cite-pop-title{
+  font-size: 0.80rem;
+  font-weight: 700;
+  color: var(--accent) !important;
+  margin-bottom: 6px;
+}
+.kb-cite-pop-main{
+  font-size: 0.92rem;
+  line-height: 1.45;
+  color: var(--text-main) !important;
+}
+.kb-cite-pop-sub{
+  font-size: 0.80rem;
+  line-height: 1.35;
+  color: var(--text-soft) !important;
+  margin-top: 6px;
+}
+.kb-cite-pop-doi{
+  margin-top: 7px;
+  font-size: 0.84rem;
+}
+.kb-cite-pop-doi a{
+  color: var(--accent) !important;
+  text-decoration: underline;
+}
+.kb-cite-pop-close{
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  border: 1px solid var(--btn-border);
+  border-radius: 8px;
+  background: var(--btn-bg);
+  color: var(--btn-text);
+  width: 22px;
+  height: 22px;
+  line-height: 20px;
+  text-align: center;
+  font-size: 14px;
+  cursor: pointer;
+}
+.kb-inpaper-cite{
+  display: inline;
+  font-size: inherit !important;
+  font-weight: 500;
+  line-height: inherit;
+  vertical-align: baseline !important;
+  text-decoration: none !important;
+  color: var(--accent) !important;
+}
+.kb-inpaper-cite:hover{
+  text-decoration: underline !important;
+}
+a[href^="#kb-cite-"]{
+  display: inline;
+  font-size: inherit !important;
+  font-weight: 500;
+  line-height: inherit;
+  vertical-align: baseline !important;
+  text-decoration: none !important;
+  color: var(--accent) !important;
+}
+a[href^="#kb-cite-"]:hover{
+  text-decoration: underline !important;
+}
+a[href^="#kb-cite-"]::before{ content: "["; }
+a[href^="#kb-cite-"]::after{ content: "]"; }
 
 .snipbox{
   background: var(--snip-bg);
@@ -1055,7 +1184,7 @@ div[data-testid="stCode"] *::after,
 .stTextArea{ position: relative; }
 .stTextArea::after,
 div[data-testid="stTextArea"]::after{
-  content: "Ctrl+Enter 发送";
+  content: "Ctrl+Enter 鍙戦€?;
   position: absolute;
   right: 14px;
   bottom: 10px;
@@ -1107,7 +1236,7 @@ body.kb-resizing .kb-input-dock *{
 .kb-input-dock.kb-dock-positioned{ max-width: none !important; }
 .kb-input-dock div[data-testid="stForm"]{ margin-bottom: 0 !important; }
 .kb-input-dock::before{
-  content: "问点什么...（会先检索你的 Markdown 再回答）";
+  content: "Ask anything... (searches Markdown first)";
   display: block;
   font-size: 0.75rem;
   color: var(--muted);
@@ -1372,7 +1501,7 @@ def _inject_copy_js() -> None:
       t = root.createElement("div");
       t.id = TOAST_ID;
       t.className = "kb-toast";
-      t.textContent = "已复制";
+      t.textContent = "宸插鍒?;
       root.body.appendChild(t);
     }
     return t;
@@ -1380,7 +1509,7 @@ def _inject_copy_js() -> None:
 
   function toast(msg) {
     const t = ensureToast();
-    t.textContent = msg || "已复制";
+    t.textContent = msg || "宸插鍒?;
     t.classList.add("show");
     clearTimeout(t._kbTimer);
     t._kbTimer = setTimeout(() => t.classList.remove("show"), 900);
@@ -1428,7 +1557,7 @@ def _inject_copy_js() -> None:
   async function copyText(text) {
     try {
       await navigator.clipboard.writeText(text);
-      toast("已复制");
+      toast("宸插鍒?);
       return true;
     } catch (e) {
       // Fallback: execCommand
@@ -1442,10 +1571,10 @@ def _inject_copy_js() -> None:
         ta.select();
         root.execCommand("copy");
         root.body.removeChild(ta);
-        toast("已复制");
+        toast("宸插鍒?);
         return true;
       } catch (e2) {
-        toast("复制失败");
+        toast("澶嶅埗澶辫触");
         return false;
       }
     }
@@ -1587,7 +1716,7 @@ def _inject_copy_js() -> None:
         const host = pre.parentElement;
         if (!host) return false;
         const nativeBtn = host.querySelector(
-          'button[aria-label*="copy" i], button[title*="copy" i], button[aria-label*="复制"], button[title*="复制"], [data-testid*="copy" i]'
+          'button[aria-label*="copy" i], button[title*="copy" i], button[aria-label*="澶嶅埗"], button[title*="澶嶅埗"], [data-testid*="copy" i]'
         );
         return !!nativeBtn;
       } catch (e) {
@@ -1615,7 +1744,7 @@ def _inject_copy_js() -> None:
       const btn = root.createElement("button");
       btn.className = "kb-codecopy";
       btn.type = "button";
-      btn.textContent = "复制代码";
+      btn.textContent = "澶嶅埗浠ｇ爜";
       btn.addEventListener("click", async (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -1644,7 +1773,7 @@ def _inject_copy_js() -> None:
         const tex = extractTexFromKaTeX(n) || (n.innerText || "").trim();
         if (!tex) return;
         await copyText(tex);
-        toast("已复制 LaTeX");
+        toast("宸插鍒?LaTeX");
       });
     }
   }
@@ -1709,15 +1838,20 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
   function normalizeSidebarCloseIcon() {{
     try {{
       const mainText = mode === "dark" ? "#e7eaef" : "#1f2329";
+      const collapseGlyph = "\\u2039"; // small left-pointing chevron
       const sidebars = doc.querySelectorAll('section[data-testid="stSidebar"]');
       for (const sidebar of sidebars) {{
-        const sbRect = sidebar.getBoundingClientRect ? sidebar.getBoundingClientRect() : null;
-        const btns = sidebar.querySelectorAll("button");
+        // Only target Streamlit's native sidebar-collapse controls.
+        // Avoid position-based heuristics that can catch custom top-right buttons.
+        const btns = sidebar.querySelectorAll(
+          '[data-testid="stSidebarCollapseButton"] button, ' +
+          '[data-testid="stSidebarNav"] button[aria-label*="close" i], ' +
+          '[data-testid="stSidebarNav"] button[aria-label*="collapse" i], ' +
+          '[data-testid="stSidebarNav"] button[aria-label*="鍏抽棴"]'
+        );
         for (const b of btns) {{
           const aria = String(b.getAttribute("aria-label") || "").toLowerCase();
-          const rect = b.getBoundingClientRect ? b.getBoundingClientRect() : null;
-          const nearTopRight = !!(sbRect && rect && rect.top <= (sbRect.top + 90) && rect.left >= (sbRect.right - 100));
-          const maybeClose = aria.includes("close") || aria.includes("collapse") || aria.includes("关闭") || nearTopRight;
+          const maybeClose = aria.includes("close") || aria.includes("collapse");
           if (!maybeClose) continue;
           try {{
             b.style.setProperty("width", "34px", "important");
@@ -1743,9 +1877,11 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
           if (!glyph) {{
             glyph = doc.createElement("span");
             glyph.className = "kb-close-glyph";
-            glyph.textContent = "×";
             glyph.setAttribute("aria-hidden", "true");
             b.appendChild(glyph);
+          }}
+          if (glyph.textContent !== collapseGlyph) {{
+            glyph.textContent = collapseGlyph;
           }}
           paint(glyph, mainText);
         }}
@@ -1793,6 +1929,141 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
     clearCodeLineArtifacts();
   }}
 
+  let citePopup = null;
+  let citeClickBound = false;
+  let citeDocClick = null;
+  let citeDocKey = null;
+
+  function escapeHtml(s) {{
+    return String(s || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }}
+
+  function closeCitePopup() {{
+    try {{
+      if (citePopup && citePopup.parentNode) {{
+        citePopup.parentNode.removeChild(citePopup);
+      }}
+    }} catch (e) {{}}
+    citePopup = null;
+  }}
+
+  function findCitePayload(anchorId) {{
+    if (!anchorId) return null;
+    try {{
+      const nodes = doc.querySelectorAll(".kb-cite-data[data-kb-cite]");
+      for (const n of nodes) {{
+        if (!n) continue;
+        if (String(n.getAttribute("data-kb-cite") || "") !== String(anchorId || "")) continue;
+        const raw = String(n.getAttribute("data-kb-payload") || "");
+        if (!raw) return null;
+        try {{
+          return JSON.parse(raw);
+        }} catch (e) {{
+          return null;
+        }}
+      }}
+    }} catch (e) {{}}
+    return null;
+  }}
+
+  function renderCitePopup(payload, x, y) {{
+    if (!payload || typeof payload !== "object") return;
+    closeCitePopup();
+
+    const num = Number(payload.num || 0);
+    const sourceName = String(payload.source_name || "");
+    const title = String(payload.title || "");
+    const raw = String(payload.raw || "");
+    const venue = String(payload.venue || "");
+    const year = String(payload.year || "");
+    const doi = String(payload.doi || "");
+    const doiUrl = String(payload.doi_url || "");
+
+    const main = title || raw || "(no reference text)";
+    const subParts = [];
+    if (sourceName) subParts.push("source: " + sourceName);
+    if (venue) subParts.push(venue);
+    if (year) subParts.push(year);
+    const sub = subParts.join(" | ");
+
+    const pop = doc.createElement("div");
+    pop.className = "kb-cite-pop";
+    pop.innerHTML =
+      '<button type="button" class="kb-cite-pop-close" aria-label="Close">×</button>' +
+      '<div class="kb-cite-pop-title">[' + (isFinite(num) && num > 0 ? String(num) : "?") + "] 文内参考</div>" +
+      '<div class="kb-cite-pop-main">' + escapeHtml(main) + "</div>" +
+      (sub ? ('<div class="kb-cite-pop-sub">' + escapeHtml(sub) + "</div>") : "") +
+      (doiUrl
+        ? ('<div class="kb-cite-pop-doi">DOI: <a href="' + escapeHtml(doiUrl) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(doi || doiUrl) + "</a></div>")
+        : "");
+
+    doc.body.appendChild(pop);
+    citePopup = pop;
+
+    const vw = Math.max(0, host.innerWidth || doc.documentElement.clientWidth || 0);
+    const vh = Math.max(0, host.innerHeight || doc.documentElement.clientHeight || 0);
+    const rect = pop.getBoundingClientRect();
+    let left = Math.max(8, Number(x || 0) + 12);
+    let top = Math.max(8, Number(y || 0) + 12);
+    if (left + rect.width > vw - 8) left = Math.max(8, vw - rect.width - 8);
+    if (top + rect.height > vh - 8) top = Math.max(8, Number(y || 0) - rect.height - 10);
+    pop.style.left = Math.round(left) + "px";
+    pop.style.top = Math.round(top) + "px";
+
+    try {{
+      const closeBtn = pop.querySelector(".kb-cite-pop-close");
+      if (closeBtn) {{
+        closeBtn.addEventListener("click", function (e) {{
+          e.preventDefault();
+          e.stopPropagation();
+          closeCitePopup();
+        }});
+      }}
+    }} catch (e) {{}}
+  }}
+
+  function bindCitationPopover() {{
+    if (citeClickBound) return;
+    citeClickBound = true;
+
+    doc.addEventListener("click", function (e) {{
+      try {{
+        const target = e.target;
+        const a = target && target.closest ? target.closest("a[href^='#kb-cite-']") : null;
+        if (!a) return;
+        const href = String(a.getAttribute("href") || "");
+        const id = href.startsWith("#") ? href.slice(1) : href;
+        if (!id) return;
+        const payload = findCitePayload(id);
+        if (!payload) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const x = Number(e.clientX || 0);
+        const y = Number(e.clientY || 0);
+        renderCitePopup(payload, x, y);
+      }} catch (err) {{}}
+    }}, true);
+
+    citeDocClick = function (e) {{
+      if (!citePopup) return;
+      const t = e.target;
+      if (t && t.closest && t.closest("a[href^='#kb-cite-']")) return;
+      if (t && citePopup.contains(t)) return;
+      closeCitePopup();
+    }};
+    citeDocKey = function (e) {{
+      if (!citePopup) return;
+      if (String(e.key || "").toLowerCase() === "escape") closeCitePopup();
+    }};
+    doc.addEventListener("click", citeDocClick, true);
+    doc.addEventListener("keydown", citeDocKey, true);
+  }}
+
   let raf = 0;
   function schedule() {{
     if (raf) return;
@@ -1812,14 +2083,21 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
   }}
 
   function destroy() {{
+    closeCitePopup();
     try {{ if (mo) mo.disconnect(); }} catch (e) {{}}
     try {{ if (raf) host.cancelAnimationFrame(raf); }} catch (e) {{}}
+    try {{ if (citeDocClick) doc.removeEventListener("click", citeDocClick, true); }} catch (e) {{}}
+    try {{ if (citeDocKey) doc.removeEventListener("keydown", citeDocKey, true); }} catch (e) {{}}
+    citeDocClick = null;
+    citeDocKey = null;
+    citeClickBound = false;
   }}
 
   host[KEY] = {{ destroy }};
 
   schedule();
   observe();
+  bindCitationPopover();
 }})();
 </script>
         """,
@@ -1905,16 +2183,40 @@ def _inject_auto_rerun_once(*, delay_ms: int = 3500) -> None:
 <script>
 (function () {{
   try {{
-    const root = window.parent;
+    const root = window.top || window.parent || window;
     if (!root) return;
-    if (root._kbAutoRefreshTimer) return;
-    root._kbAutoRefreshTimer = setTimeout(function () {{
+    
+    // Keep exactly one one-shot timer per delay.
+    // Streamlit rerun recreates component iframes; recursive timers can break.
+    // IMPORTANT: do not use location.reload() here (it refreshes the whole page).
+    const timerKey = "_kbAutoRefreshTimer_" + {delay};
+    
+    // Clear existing timer before creating a new one.
+    if (root[timerKey]) {{
       try {{
-        root._kbAutoRefreshTimer = null;
-        root.postMessage({{ isStreamlitMessage: true, type: "streamlit:rerunScript" }}, "*");
+        clearTimeout(root[timerKey]);
+        root[timerKey] = null;
+      }} catch (e) {{}}
+    }}
+    
+    root[timerKey] = setTimeout(function () {{
+      try {{
+        root[timerKey] = null;
+        const msgs = [
+          {{ isStreamlitMessage: true, type: "streamlit:rerunScript" }},
+          {{ type: "streamlit:rerun" }},
+        ];
+        const targets = [window, window.parent, root];
+        for (const m of msgs) {{
+          for (const t of targets) {{
+            try {{ t.postMessage(m, "*"); }} catch (e) {{}}
+          }}
+        }}
       }} catch (e) {{}}
     }}, {delay});
-  }} catch (e) {{}}
+  }} catch (e) {{
+    // Frontend JS errors should never break the Streamlit app.
+  }}
 }})();
 </script>
         """,

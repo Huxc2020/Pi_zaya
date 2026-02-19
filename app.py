@@ -23,7 +23,13 @@ from ui.runtime_patches import (
 )
 from ui.strings import S
 from ui.chat_widgets import _normalize_math_markdown, _render_ai_live_header, _render_answer_copy_bar, _render_app_title, _resolve_sidebar_logo_path, _sidebar_logo_data_uri
-from ui.refs_renderer import _annotate_equation_tags_with_sources, _render_inpaper_citation_resolver, _render_refs
+from ui.refs_renderer import (
+    _annotate_equation_tags_with_sources,
+    _annotate_inpaper_citations_with_hover_meta,
+    _render_inpaper_citation_details,
+    _render_inpaper_citation_resolver,
+    _render_refs,
+)
 
 from kb.chat_store import ChatStore
 from kb.bg_queue_state import is_running_snapshot as bg_is_running_snapshot
@@ -50,6 +56,11 @@ from kb.file_ops import (
 from kb.rename_manager import ensure_state_defaults as ensure_rename_manager_state
 from kb.rename_manager import render_panel as render_rename_manager_panel
 from kb.rename_manager import render_prompt as render_rename_prompt
+from kb.reference_sync import (
+    is_running_snapshot as refsync_is_running_snapshot,
+    snapshot as refsync_snapshot,
+    start_reference_sync,
+)
 from kb.retriever import BM25Retriever
 from kb.store import load_all_chunks
 from kb.retrieval_engine import configure_cache as configure_retrieval_cache
@@ -513,7 +524,16 @@ def _page_chat(
                                 except Exception:
                                     hits_for_anno = []
                                 body2 = _annotate_equation_tags_with_sources(body, hits_for_anno)
-                                st.markdown(_normalize_math_markdown(body2))
+                                body3, cite_details = _annotate_inpaper_citations_with_hover_meta(
+                                    body2,
+                                    hits_for_anno,
+                                    anchor_ns=f"{conv_id}:{idx}:{msg_id}:live",
+                                )
+                                st.markdown(_normalize_math_markdown(body3))
+                                _render_inpaper_citation_details(
+                                    cite_details,
+                                    key_ns=f"{conv_id}_{idx}_{msg_id}_live",
+                                )
                             else:
                                 st.markdown("<div class='kb-ai-live-dots'>...</div>", unsafe_allow_html=True)
                         else:
@@ -532,7 +552,16 @@ def _page_chat(
                                     except Exception:
                                         hits_for_anno = []
                                     body2 = _annotate_equation_tags_with_sources(body, hits_for_anno)
-                                    st.markdown(_normalize_math_markdown(body2))
+                                    body3, cite_details = _annotate_inpaper_citations_with_hover_meta(
+                                        body2,
+                                        hits_for_anno,
+                                        anchor_ns=f"{conv_id}:{idx}:{msg_id}:done",
+                                    )
+                                    st.markdown(_normalize_math_markdown(body3))
+                                    _render_inpaper_citation_details(
+                                        cite_details,
+                                        key_ns=f"{conv_id}_{idx}_{msg_id}_done",
+                                    )
                             else:
                                 st.markdown("<div class='msg-meta'>AI（处理中）</div>", unsafe_allow_html=True)
                                 st.caption("处理中…")
@@ -554,7 +583,16 @@ def _page_chat(
                         except Exception:
                             hits_for_anno = []
                         body2 = _annotate_equation_tags_with_sources(body, hits_for_anno)
-                        st.markdown(_normalize_math_markdown(body2))
+                        body3, cite_details = _annotate_inpaper_citations_with_hover_meta(
+                            body2,
+                            hits_for_anno,
+                            anchor_ns=f"{conv_id}:{idx}:{msg_id}:hist",
+                        )
+                        st.markdown(_normalize_math_markdown(body3))
+                        _render_inpaper_citation_details(
+                            cite_details,
+                            key_ns=f"{conv_id}_{idx}_{msg_id}_hist",
+                        )
 
                 if (last_user_msg_id > 0) and (last_user_msg_id not in shown_refs_user_ids):
                     # Use the current assistant text (partial/answer/content) to extract in-paper citations.
@@ -926,13 +964,18 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
 
     need_reindex, reindex_reason = _kb_reindex_hint(md_out_root, db_dir, pdf_dir)
 
+    reindex_info_msgs: list[str] = []
+    reindex_warn_msgs: list[str] = []
+    reindex_err_msg = ""
+    reindex_ok = False
+
     st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
     cols = st.columns([1.0, 1.25, 1.1, 6.65])
     with cols[0]:
         if st.button(S["open_dir"], key="open_pdf_dir"):
             open_in_explorer(pdf_dir)
     with cols[1]:
-        do_reindex = need_reindex and st.button(S["reindex_now"], key="reindex_btn")
+        do_reindex = st.button(S["reindex_now"], key="reindex_btn")
         if do_reindex:
             ingest_py = Path(__file__).resolve().parent / "ingest.py"
             if ingest_py.exists():
@@ -946,24 +989,49 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
                         text=True,
                     )
                 if int(proc.returncode or 0) == 0:
+                    try:
+                        ref_budget_s = float(os.environ.get("KB_CROSSREF_BUDGET_S", "45") or 45.0)
+                    except Exception:
+                        ref_budget_s = 45.0
+                    ref_launch: dict[str, object] = {}
+                    ref_launch_err = ""
+                    try:
+                        ref_launch = start_reference_sync(
+                            src_root=md_out_root,
+                            db_dir=db_dir,
+                            incremental=True,
+                            enable_title_lookup=True,
+                            crossref_time_budget_s=float(max(5.0, ref_budget_s)),
+                            pdf_root=pdf_dir,
+                            library_db_path=settings.library_db_path,
+                        )
+                    except Exception as e:
+                        ref_launch_err = str(e)
+
                     if sync_n > 0:
                         preview_sync = ", ".join(sync_msgs[:2])
                         suffix_sync = "..." if sync_n > 2 else ""
-                        st.info(f"已同步 {sync_n} 个 MD 主文件名：{preview_sync}{suffix_sync}")
+                        reindex_info_msgs.append(f"已同步 {sync_n} 个 MD 主文件名：{preview_sync}{suffix_sync}")
                     if moved_n > 0:
                         preview = ", ".join(moved_dirs[:3])
                         suffix = "..." if moved_n > 3 else ""
-                        st.info(f"已归档 {moved_n} 个旧 MD 目录：{preview}{suffix}")
-                    st.success(S["run_ok"])
+                        reindex_info_msgs.append(f"已归档 {moved_n} 个旧 MD 目录：{preview}{suffix}")
+                    if ref_launch_err:
+                        reindex_warn_msgs.append(f"参考文献索引后台同步启动失败：{ref_launch_err}")
+                    elif bool(ref_launch.get("started")):
+                        reindex_info_msgs.append("参考文献索引已切换为后台同步，页面可继续正常使用。")
+                    else:
+                        reindex_info_msgs.append("参考文献索引任务已在后台运行中。")
+                    reindex_ok = True
                     st.session_state["kb_reindex_pending"] = False
                     st.session_state.pop("_kb_reindex_hint_cache", None)
                     retriever_reload_flag["reload"] = True
                 else:
                     err = (proc.stderr or proc.stdout or "").strip()
                     first_line = err.splitlines()[0] if err else "ingest.py 执行失败"
-                    st.error(f"更新失败：{first_line}")
+                    reindex_err_msg = f"更新失败：{first_line}"
             else:
-                st.error("未找到 ingest.py，无法更新知识库。")
+                reindex_err_msg = "未找到 ingest.py，无法更新知识库。"
     with cols[2]:
         if st.button("文件名管理", key="rename_mgr_btn", help="根据 PDF 内容识别「期刊-年份-标题」并建议重命名"):
             st.session_state["rename_mgr_open"] = True
@@ -978,6 +1046,50 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
             hints.append(reindex_reason)
         if hints:
             st.caption(" | ".join(hints))
+
+    if reindex_err_msg:
+        st.error(reindex_err_msg)
+    for _msg in reindex_warn_msgs:
+        st.warning(_msg)
+    for _msg in reindex_info_msgs:
+        st.info(_msg)
+    if reindex_ok:
+        st.success(S["run_ok"])
+
+    ref_snap = refsync_snapshot()
+    ref_run_id = int(ref_snap.get("run_id", 0) or 0)
+    ref_status = str(ref_snap.get("status") or "").strip().lower()
+    ref_seen_id = int(st.session_state.get("_refsync_seen_run_id", 0) or 0)
+    if ref_run_id > 0 and ref_run_id != ref_seen_id:
+        if ref_status == "done":
+            done_msg = str(ref_snap.get("message") or "").strip()
+            st.success(done_msg or "参考文献索引后台同步完成。")
+            st.session_state["_refsync_seen_run_id"] = ref_run_id
+            st.session_state.pop("_kb_ref_index_cache_v1", None)
+        elif ref_status == "error":
+            err_msg = str(ref_snap.get("error") or "").strip() or str(ref_snap.get("message") or "").strip()
+            st.warning(f"参考文献索引后台同步失败：{err_msg}")
+            st.session_state["_refsync_seen_run_id"] = ref_run_id
+
+    if refsync_is_running_snapshot(ref_snap):
+        docs_done = int(ref_snap.get("docs_done", 0) or 0)
+        docs_total = int(ref_snap.get("docs_total", 0) or 0)
+        current_doc = str(ref_snap.get("current") or "").strip()
+        stage = str(ref_snap.get("stage") or "").strip()
+        started_at = float(ref_snap.get("started_at", 0.0) or 0.0)
+        elapsed_s = max(0, int(time.time() - started_at)) if started_at > 0 else 0
+        if docs_total > 0:
+            progress = min(0.99, max(0.01, docs_done / max(1, docs_total)))
+            status_line = f"{docs_done}/{docs_total} 文档，阶段: {stage or 'running'}"
+        else:
+            progress = 0.03
+            status_line = f"阶段: {stage or 'starting'}"
+        st.markdown("<div class='refbox'><strong>参考文献索引后台同步中</strong></div>", unsafe_allow_html=True)
+        st.progress(progress)
+        if current_doc:
+            st.caption(f"{status_line} | 当前: {current_doc} | 已运行 {elapsed_s}s")
+        else:
+            st.caption(f"{status_line} | 已运行 {elapsed_s}s")
 
     ensure_rename_manager_state()
     render_rename_manager_panel(
@@ -1202,8 +1314,12 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
                 bg2 = _bg_snapshot()
             running = bg_is_running_snapshot(bg2)
             if not running:
+                # Reset warm-up UI state when background worker is idle.
+                st.session_state.pop(f"_{key_ns}_overall_warm_start_ts", None)
+                st.session_state.pop(f"_{key_ns}_file_warm_start_ts", None)
+                st.session_state.pop(f"_{key_ns}_progress_meta", None)
                 return
-            
+
             done = int(bg2.get("done", 0) or 0)
             total = int(bg2.get("total", 0) or 0)
             cur = str(bg2.get("current") or "")
@@ -1214,65 +1330,198 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
             p_profile = str(bg2.get("cur_profile") or "").strip()
             p_llm = str(bg2.get("cur_llm_profile") or "").strip()
             p_tail = list(bg2.get("cur_log_tail") or [])
-            
-            # Enhanced progress display
-            st.markdown("<div class='refbox'><strong>📊 后台转换进度</strong></div>", unsafe_allow_html=True)
-            
-            # Overall progress section
+
+            # Progress card
+            st.markdown("<div class='refbox'><strong>\u540e\u53f0\u8f6c\u6362\u8fdb\u5ea6</strong></div>", unsafe_allow_html=True)
+
+            # Monotonic tiny warm-up before first-page progress becomes available.
+            now_ts = time.time()
+            meta_key = f"_{key_ns}_progress_meta"
+            prev_meta = st.session_state.get(meta_key, {}) or {}
+            prev_done = int(prev_meta.get("done", -1) or -1)
+            prev_total = int(prev_meta.get("total", total) or total)
+            prev_cur = str(prev_meta.get("cur") or "")
+            prev_overall_display = float(prev_meta.get("overall_display", 0.0) or 0.0)
+            prev_file_display = float(prev_meta.get("file_display", 0.0) or 0.0)
+            prev_file_key = str(prev_meta.get("file_key") or "")
+
+            # New run: clear cached display values to avoid carrying old bars.
+            if (done < prev_done) or ((done == 0) and (prev_done > 0)) or (total < prev_total):
+                prev_overall_display = 0.0
+                prev_file_display = 0.0
+                prev_file_key = ""
+                st.session_state.pop(f"_{key_ns}_overall_warm_start_ts", None)
+                st.session_state.pop(f"_{key_ns}_file_warm_start_ts", None)
+
+            if cur != prev_cur:
+                st.session_state.pop(f"_{key_ns}_file_warm_start_ts", None)
+
+            def _warmup_value(start_key: str, base: float, cap: float, speed: float) -> float:
+                if start_key not in st.session_state:
+                    st.session_state[start_key] = now_ts
+                elapsed = max(0.0, now_ts - float(st.session_state.get(start_key) or now_ts))
+                return min(cap, base + elapsed * speed)
+
+            # Tiny warm-up: keep visible movement but avoid first-page rollback.
+            tiny_file_warm = _warmup_value(
+                f"_{key_ns}_file_warm_start_ts",
+                base=0.001,
+                cap=0.010,
+                speed=0.002,
+            )
+
+            file_key = f"{done}|{cur}" if cur else ""
+            file_display = 0.0
+            if cur:
+                if p_total > 0:
+                    file_real = p_done / max(1, p_total)
+                    if p_done <= 0:
+                        file_target = max(file_real, tiny_file_warm)
+                    else:
+                        file_target = file_real
+                else:
+                    file_target = tiny_file_warm
+
+                if file_key and (file_key == prev_file_key):
+                    file_display = max(file_target, prev_file_display)
+                else:
+                    file_display = file_target
+
+            file_display = max(0.0, min(1.0, file_display))
+            if p_done > 0:
+                st.session_state.pop(f"_{key_ns}_file_warm_start_ts", None)
+
+            queued_n = max(0, len(q2))
+
+            # Overall progress: include current-file fractional progress for smoother updates.
+            overall_display = 0.0
             if total > 0:
-                overall_progress = done / max(1, total)
-                st.markdown(f"**整体进度：{done}/{total} 篇** ({overall_progress*100:.1f}%)")
-                st.progress(overall_progress)
+                base_done_ratio = done / max(1, total)
+                if cur:
+                    cur_fraction = min(file_display, 0.999)
+                else:
+                    cur_fraction = _warmup_value(
+                        f"_{key_ns}_overall_warm_start_ts",
+                        base=0.001,
+                        cap=0.010,
+                        speed=0.0015,
+                    )
+                overall_target = max(base_done_ratio, min(1.0, (done + cur_fraction) / max(1, total)))
+                overall_display = max(overall_target, prev_overall_display)
+                overall_display = max(0.0, min(1.0, overall_display))
+
+                st.markdown(f"**\u603b\u8fdb\u5ea6** {done}/{total} \u4e2a\u6587\u4ef6 ({overall_display * 100:.1f}%)")
+                st.progress(overall_display)
+                if running and done <= 0 and p_done <= 0:
+                    st.caption(f"\u6b63\u5728\u542f\u52a8\u8f6c\u6362\u6d41\u7a0b\uff0c\u9996\u6279\u9875\u9762\u5904\u7406\u4e2d\uff08\u961f\u5217 {queued_n} \u4e2a\u6587\u4ef6\uff09...")
+                if done > 0:
+                    st.session_state.pop(f"_{key_ns}_overall_warm_start_ts", None)
             else:
-                st.caption("等待任务...")
-            
-            # Current file progress section
+                st.caption("\u6b63\u5728\u51c6\u5907\u4efb\u52a1\u961f\u5217...")
+
+            # Current file progress
             if cur:
                 st.markdown("---")
-                st.markdown(f"**当前文件：** `{cur}`")
-                
+                st.markdown(f"**\u5f53\u524d\u6587\u4ef6** `{cur}`")
+
                 if p_total > 0:
-                    file_progress = p_done / max(1, p_total)
-                    st.markdown(f"**页面进度：{p_done}/{p_total} 页** ({file_progress*100:.1f}%)")
-                    st.progress(file_progress)
-                elif bool(bg2.get("running")):
-                    st.caption("🔄 正在处理文件...")
-                
-                # Show current status message
+                    st.markdown(f"**\u9875\u8fdb\u5ea6** {p_done}/{p_total} \u9875 ({file_display * 100:.1f}%)")
+                else:
+                    st.markdown(f"**\u9875\u8fdb\u5ea6** \u9996\u6279\u9875\u9762\u9884\u5904\u7406\u4e2d ({file_display * 100:.1f}%)")
+                st.progress(file_display)
+
+                # Human-readable status line (filter internal profile noise).
+                status_line = ""
                 if p_msg and (p_msg not in {p_profile, p_llm}):
-                    # Filter out profile messages for cleaner display
-                    if not p_msg.startswith("converter profile:") and not p_msg.startswith("LLM concurrency:"):
-                        st.caption(f"💬 {p_msg}")
+                    if (not p_msg.startswith("converter profile:")) and (not p_msg.startswith("LLM concurrency:")):
+                        status_line = p_msg
+                if (not status_line) and p_total > 0 and p_done <= 0:
+                    status_line = "\u6b63\u5728\u8bfb\u53d6\u9996\u6279\u9875\u9762\u5185\u5bb9..."
+                if (not status_line) and p_total <= 0:
+                    status_line = "\u6b63\u5728\u521d\u59cb\u5316\u9875\u9762\u8ba1\u6570\u4e0e\u8bc6\u522b..."
+                if status_line:
+                    st.caption(f"\u72b6\u6001\uff1a{status_line}")
+                    # Lightweight stall diagnosis for user-facing clarity.
+                    # Typical status examples:
+                    # - "Processing page 15/15 ... (alive 42s)"
+                    # - "Post-processing after pages 15/15 ... (alive 18s)"
+                    low = status_line.lower()
+                    alive_s = -1
+                    try:
+                        k = low.rfind("alive ")
+                        if k >= 0:
+                            tail = low[k + len("alive "):]
+                            num = ""
+                            for ch in tail:
+                                if ch.isdigit():
+                                    num += ch
+                                else:
+                                    break
+                            if num:
+                                alive_s = int(num)
+                    except Exception:
+                        alive_s = -1
+                    if alive_s >= 20:
+                        if low.startswith("processing page "):
+                            page_hint = ""
+                            try:
+                                part = low[len("processing page "):]
+                                lhs = part.split("/", 1)[0].strip()
+                                if lhs.isdigit():
+                                    page_hint = lhs
+                            except Exception:
+                                page_hint = ""
+                            if page_hint:
+                                st.caption(f"\u8bca\u65ad\uff1a\u5f53\u524d\u5361\u5728\u7b2c {page_hint} \u9875\u7684 VL/LLM \u8bc6\u522b\u9636\u6bb5\uff08\u5df2\u7b49\u5f85 {alive_s}s\uff09")
+                            else:
+                                st.caption(f"\u8bca\u65ad\uff1a\u5f53\u524d\u5361\u5728\u5355\u9875 VL/LLM \u8bc6\u522b\u9636\u6bb5\uff08\u5df2\u7b49\u5f85 {alive_s}s\uff09")
+                        elif low.startswith("post-processing after pages"):
+                            st.caption(f"\u8bca\u65ad\uff1a\u9875\u9762\u5df2\u8f6c\u5b8c\uff0c\u5f53\u524d\u5361\u5728\u540e\u5904\u7406\u9636\u6bb5\uff08\u5df2\u7b49\u5f85 {alive_s}s\uff09")
             elif done > 0:
                 st.markdown("---")
-                st.success(f"✅ 已完成：{last}" if last else f"✅ 已完成 {done} 篇")
-            
-            # Technical info (collapsible)
-            if p_profile or p_llm:
-                with st.expander("🔧 技术信息", expanded=False):
-                    if p_profile:
-                        st.code(p_profile, language=None)
-                    if p_llm:
-                        st.code(p_llm, language=None)
+                st.success(f"\u6700\u65b0\u5b8c\u6210\uff1a{last}" if last else f"\u5df2\u5b8c\u6210 {done} \u4e2a\u6587\u4ef6")
 
             # Control buttons
             c_bg = st.columns([1.0, 1.0, 1.0])
             with c_bg[0]:
                 # Refresh button - just rerun, don't affect background tasks
-                if st.button("🔄 刷新", key=f"{key_ns}_refresh"):
+                if st.button("\u5237\u65b0", key=f"{key_ns}_refresh"):
                     st.experimental_rerun()
             with c_bg[1]:
-                if st.button("⏹️ 停止", key=f"{key_ns}_stop"):
+                if st.button("\u505c\u6b62", key=f"{key_ns}_stop"):
                     _bg_cancel_all()
                     st.experimental_rerun()
             with c_bg[2]:
                 # Auto-refresh is scheduled globally in the sidebar status area.
-                st.caption(f"自动刷新中 · 心跳 {time.strftime('%H:%M:%S')}")
-            
+                st.caption(f"\u81ea\u52a8\u5237\u65b0\u4e2d \u00b7 \u5fc3\u8df3 {time.strftime('%H:%M:%S')}")
+
+            # Optional detailed log: dedup/filter noisy internal lines.
             if p_tail:
-                with st.expander("📋 进度日志", expanded=False):
-                    for ln in p_tail[-12:]:
-                        st.caption(ln)
+                clean_tail: list[str] = []
+                prev = ""
+                for ln in p_tail[-24:]:
+                    s = str(ln or "").strip()
+                    if not s:
+                        continue
+                    if s.startswith("converter profile:") or s.startswith("LLM concurrency:"):
+                        continue
+                    if s == prev:
+                        continue
+                    clean_tail.append(s)
+                    prev = s
+                if clean_tail:
+                    with st.expander("\u8be6\u7ec6\u8fdb\u5ea6\uff08\u53ef\u9009\uff09", expanded=False):
+                        for ln in clean_tail[-10:]:
+                            st.caption(f"- {ln}")
+
+            st.session_state[meta_key] = {
+                "done": done,
+                "total": total,
+                "cur": cur,
+                "overall_display": overall_display,
+                "file_display": file_display,
+                "file_key": file_key,
+            }
 
             # NOTE:
             # Do not call server-side rerun here (inside tab blocks), it may interrupt
@@ -1567,75 +1816,103 @@ def _page_library(settings, lib_store: LibraryStore, db_dir: Path, prefs_path: P
     st.subheader(S["upload_pdf"])
     st.caption(S["batch_upload"])
 
-    handled: dict = st.session_state.setdefault("upload_handled", {})
-    # Use a unique key to prevent duplicate file uploaders
-    ups = st.file_uploader("PDF", type=["pdf"], accept_multiple_files=True, key="pdf_uploader_main")
+    # In old Streamlit builds, frequent heartbeat reruns may duplicate file_uploader DOM.
+    # Lock upload controls while any background task with auto-rerun is active.
+    bg_upload = _bg_snapshot()
+    ref_upload = refsync_snapshot()
+    conv_running = bg_is_running_snapshot(bg_upload)
+    ref_running = refsync_is_running_snapshot(ref_upload)
+    upload_locked = bool(conv_running or ref_running)
 
-    if ups:
-        for n, up in enumerate(ups, start=1):
-            data = bytes(up.getbuffer())
-            file_sha1 = hashlib.sha1(data).hexdigest()
+    prev_upload_locked = bool(st.session_state.get("_upload_locked_prev", False))
+    if prev_upload_locked and not upload_locked:
+        # Force-remount uploader once when background tasks stop, clearing stale DOM.
+        st.session_state["pdf_uploader_nonce"] = int(st.session_state.get("pdf_uploader_nonce", 0) or 0) + 1
+    st.session_state["_upload_locked_prev"] = upload_locked
 
-            with st.expander(f"{up.name} ({n}/{len(ups)})", expanded=(n == 1)):
-                if file_sha1 in handled:
-                    st.info(handled[file_sha1].get("msg", ""))
-                    continue
+    if upload_locked:
+        if conv_running:
+            st.info("\u540e\u53f0\u8f6c\u6362\u6b63\u5728\u8fd0\u884c\uff0c\u4e0a\u4f20\u533a\u6682\u65f6\u9501\u5b9a\uff0c\u4efb\u52a1\u7ed3\u675f\u540e\u4f1a\u81ea\u52a8\u6062\u590d\u3002")
+            st.caption("\u5982\u9700\u7acb\u5373\u4e0a\u4f20\uff0c\u8bf7\u5148\u70b9\u51fb\u300c\u505c\u6b62\u300d\u3002")
+        else:
+            st.info("\u53c2\u8003\u6587\u732e\u7d22\u5f15\u540e\u53f0\u540c\u6b65\u4e2d\uff0c\u4e0a\u4f20\u533a\u6682\u65f6\u9501\u5b9a\uff0c\u540c\u6b65\u5b8c\u6210\u540e\u4f1a\u81ea\u52a8\u6062\u590d\u3002")
+    else:
+        handled: dict = st.session_state.setdefault("upload_handled", {})
+        uploader_nonce = int(st.session_state.get("pdf_uploader_nonce", 0) or 0)
+        uploader_key = f"pdf_uploader_main_{uploader_nonce}"
+        ups = st.file_uploader("PDF", type=["pdf"], accept_multiple_files=True, key=uploader_key)
 
-                exist = lib_store.get_by_sha1(file_sha1)
-                if exist:
-                    st.warning(S["dup_found"])
-                    st.caption(f"{S['dup_path']} {exist.get('path','')}")
-                    force = st.checkbox(S["dup_force"], value=False, key=f"dup_force_{n}")
-                    if not force:
-                        if st.button(S["dup_skip"], key=f"dup_skip_{n}"):
-                            handled[file_sha1] = {"action": "skipped", "msg": S["handled_skip"], "ts": time.time()}
-                            st.info(S["handled_skip"])
-                        else:
-                            st.caption("\u5982\u679c\u4f60\u4e0d\u60f3\u91cd\u590d\u4fdd\u5b58\uff0c\u70b9\u51fb\u201c\u8df3\u8fc7\u201d\u5373\u53ef\u3002")
+        if ups:
+            for n, up in enumerate(ups, start=1):
+                data = bytes(up.getbuffer())
+                file_sha1 = hashlib.sha1(data).hexdigest()
+
+                with st.expander(f"{up.name} ({n}/{len(ups)})", expanded=(n == 1)):
+                    if file_sha1 in handled:
+                        st.info(handled[file_sha1].get("msg", ""))
                         continue
 
-                tmp_path = _write_tmp_upload(pdf_dir, up.name, data)
-                sug: PdfMetaSuggestion = extract_pdf_meta_suggestion(tmp_path, settings=settings)
+                    exist = lib_store.get_by_sha1(file_sha1)
+                    if exist:
+                        st.warning(S["dup_found"])
+                        st.caption(f"{S['dup_path']} {exist.get('path','')}")
+                        force = st.checkbox(S["dup_force"], value=False, key=f"dup_force_{n}")
+                        if not force:
+                            if st.button(S["dup_skip"], key=f"dup_skip_{n}"):
+                                handled[file_sha1] = {"action": "skipped", "msg": S["handled_skip"], "ts": time.time()}
+                                st.info(S["handled_skip"])
+                            else:
+                                st.caption("\u5982\u679c\u4f60\u4e0d\u60f3\u91cd\u590d\u4fdd\u5b58\uff0c\u70b9\u51fb\u201c\u8df3\u8fc7\u201d\u5373\u53ef\u3002")
+                            continue
 
-                st.caption(S["name_rule"])
-                c1, c2, c3 = st.columns([2, 1, 3])
-                with c1:
-                    venue = st.text_input(S["venue"], value=sug.venue, key=f"venue_{n}")
-                with c2:
-                    year = st.text_input(S["year"], value=sug.year, key=f"year_{n}")
-                with c3:
-                    title = st.text_input(S["title_field"], value=sug.title, key=f"title_{n}")
+                    tmp_path = _write_tmp_upload(pdf_dir, up.name, data)
+                    sug: PdfMetaSuggestion = extract_pdf_meta_suggestion(tmp_path, settings=settings)
 
-                base = build_base_name(venue=venue, year=year, title=title)
-                st.text_input(S["base_name"], value=base, disabled=True, key=f"base_{n}")
+                    st.caption(S["name_rule"])
+                    c1, c2, c3 = st.columns([2, 1, 3])
+                    with c1:
+                        venue = st.text_input(S["venue"], value=sug.venue, key=f"venue_{n}")
+                    with c2:
+                        year = st.text_input(S["year"], value=sug.year, key=f"year_{n}")
+                    with c3:
+                        title = st.text_input(S["title_field"], value=sug.title, key=f"title_{n}")
 
-                dest_pdf = _next_pdf_dest_path(pdf_dir, base)
+                    base = build_base_name(
+                        venue=venue,
+                        year=year,
+                        title=title,
+                        pdf_dir=pdf_dir,
+                        md_out_root=md_out_root,
+                    )
+                    st.text_input(S["base_name"], value=base, disabled=True, key=f"base_{n}")
 
-                action_cols = st.columns(2)
-                with action_cols[0]:
-                    if st.button(S["save_pdf"], key=f"save_pdf_{n}"):
-                        _persist_upload_pdf(tmp_path, dest_pdf, data)
-                        lib_store.upsert(file_sha1, dest_pdf)
-                        handled[file_sha1] = {"action": "saved", "msg": S["handled_saved"], "ts": time.time()}
-                        st.info(f"{S['saved_as']}: {dest_pdf}")
+                    dest_pdf = _next_pdf_dest_path(pdf_dir, base)
 
-                with action_cols[1]:
-                    if st.button(S["convert_now"], key=f"convert_now_{n}"):
-                        _persist_upload_pdf(tmp_path, dest_pdf, data)
-                        lib_store.upsert(file_sha1, dest_pdf)
-                        handled[file_sha1] = {"action": "converted", "msg": S["handled_converted"], "ts": time.time()}
-                        _bg_enqueue(
-                            _build_bg_task(
-                                pdf_path=dest_pdf,
-                                out_root=md_out_root,
-                                db_dir=db_dir,
-                                no_llm=bool(no_llm),
-                                replace=False,
-                                speed_mode=str(speed_mode),
+                    action_cols = st.columns(2)
+                    with action_cols[0]:
+                        if st.button(S["save_pdf"], key=f"save_pdf_{n}"):
+                            _persist_upload_pdf(tmp_path, dest_pdf, data)
+                            lib_store.upsert(file_sha1, dest_pdf, citation_meta=(sug.crossref_meta or None))
+                            handled[file_sha1] = {"action": "saved", "msg": S["handled_saved"], "ts": time.time()}
+                            st.info(f"{S['saved_as']}: {dest_pdf}")
+
+                    with action_cols[1]:
+                        if st.button(S["convert_now"], key=f"convert_now_{n}"):
+                            _persist_upload_pdf(tmp_path, dest_pdf, data)
+                            lib_store.upsert(file_sha1, dest_pdf, citation_meta=(sug.crossref_meta or None))
+                            handled[file_sha1] = {"action": "converted", "msg": S["handled_converted"], "ts": time.time()}
+                            _bg_enqueue(
+                                _build_bg_task(
+                                    pdf_path=dest_pdf,
+                                    out_root=md_out_root,
+                                    db_dir=db_dir,
+                                    no_llm=bool(no_llm),
+                                    replace=False,
+                                    speed_mode=str(speed_mode),
+                                )
                             )
-                        )
-                        st.info("\u5df2\u52a0\u5165\u540e\u53f0\u961f\u5217\uff0c\u4f60\u53ef\u4ee5\u5207\u6362\u9875\u9762\u7ee7\u7eed\u4f7f\u7528\u3002")
-                        st.experimental_rerun()
+                            st.info("\u5df2\u52a0\u5165\u540e\u53f0\u961f\u5217\uff0c\u4f60\u53ef\u4ee5\u5207\u6362\u9875\u9762\u7ee7\u7eed\u4f7f\u7528\u3002")
+                            st.experimental_rerun()
 
 
 
@@ -1761,15 +2038,11 @@ def main() -> None:
         )
         st.session_state["active_page"] = page
 
+        # Keep DB path from config/prefs for retrieval internals.
         db_default = prefs.get("db_path") or str(settings.db_dir)
-        db_path = st.text_input(S["db_path"], value=str(db_default))
-        db_path = (db_path or "").strip().strip("'\"")
+        db_path = (str(db_default) or "").strip().strip("'\"")
         db_dir = Path(db_path).expanduser().resolve()
-        if str(db_dir) != str(prefs.get("db_path") or ""):
-            prefs2 = dict(prefs)
-            prefs2["db_path"] = str(db_dir)
-            save_prefs(prefs_path, prefs2)
-            prefs.update(prefs2)
+        st.session_state["db_dir"] = str(db_dir)
 
         top_k = st.slider(S["top_k"], min_value=2, max_value=20, value=int(prefs.get("top_k") or 6), step=1)
         temperature = st.slider(S["temp"], min_value=0.0, max_value=1.0, value=float(prefs.get("temperature") or 0.2), step=0.05)
@@ -1962,7 +2235,12 @@ def main() -> None:
     # a heartbeat by waiting briefly at the end of a run, then forcing rerun.
     # This avoids relying on browser-side postMessage scripts.
     bg_end = _bg_snapshot()
-    if bg_is_running_snapshot(bg_end):
+    ref_end = refsync_snapshot()
+    ref_running_end = (page == S["page_library"]) and refsync_is_running_snapshot(ref_end)
+    is_running_end = bg_is_running_snapshot(bg_end) or bool(ref_running_end)
+    was_running = bool(st.session_state.get("_bg_was_running", False))
+    if is_running_end:
+        st.session_state["_bg_was_running"] = True
         now_ts = time.time()
         last_ts = float(st.session_state.get("_global_auto_rerun_ts", 0.0) or 0.0)
         interval_s = 1.0
@@ -1975,6 +2253,12 @@ def main() -> None:
         st.experimental_rerun()
     else:
         st.session_state["_global_auto_rerun_ts"] = 0.0
+        # One extra rerun on running->stopped transition to flush stale disabled widgets.
+        if was_running:
+            st.session_state["_bg_was_running"] = False
+            st.experimental_rerun()
+        else:
+            st.session_state["_bg_was_running"] = False
 
 
 if __name__ == "__main__":
