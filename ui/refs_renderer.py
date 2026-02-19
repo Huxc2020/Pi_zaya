@@ -757,6 +757,133 @@ def _citation_hover_title(source_name: str, ref_num: int, ref_rec: dict) -> str:
     return txt
 
 
+def _looks_noisy_reference_title(title: str) -> bool:
+    t = str(title or "").strip()
+    if not t:
+        return True
+    if len(t) >= 200:
+        return True
+    words = [w for w in re.split(r"\s+", t) if w]
+    if len(words) >= 28:
+        return True
+    low = t.lower()
+    # Long prose-like title is usually OCR contamination, not real paper title.
+    if len(words) >= 18 and re.search(r"\b(the|and|with|through|because|therefore|contains|introduced)\b", low):
+        return True
+    return False
+
+
+def _doi_enrich_meta_cached(doi: str, *, title_hint: str = "") -> dict:
+    d = str(doi or "").strip().lower()
+    if not d:
+        return {}
+    key = "_kb_ref_doi_meta_cache_v1"
+    cache = st.session_state.get(key)
+    if not isinstance(cache, dict):
+        cache = {}
+        st.session_state[key] = cache
+    if d in cache:
+        v = cache.get(d)
+        return v if isinstance(v, dict) else {}
+    try:
+        meta = fetch_best_crossref_meta(
+            query_title=str(title_hint or "").strip(),
+            doi_hint=d,
+            allow_title_only=True,
+            min_score=0.88,
+        )
+        cache[d] = meta if isinstance(meta, dict) else {}
+    except Exception:
+        cache[d] = {}
+    v2 = cache.get(d)
+    return v2 if isinstance(v2, dict) else {}
+
+
+def _format_reference_cite_line(ref_rec: dict) -> str:
+    if not isinstance(ref_rec, dict):
+        return ""
+    authors = str(ref_rec.get("authors") or "").strip()
+    title = str(ref_rec.get("title") or "").strip()
+    venue = str(ref_rec.get("venue") or "").strip()
+    year = str(ref_rec.get("year") or "").strip()
+    volume = str(ref_rec.get("volume") or "").strip()
+    issue = str(ref_rec.get("issue") or "").strip()
+    pages = str(ref_rec.get("pages") or "").strip()
+
+    seg0 = []
+    if authors:
+        seg0.append(authors.rstrip(" ."))
+    if title:
+        seg0.append(title.rstrip(" ."))
+
+    venue_seg = str(venue or "").strip()
+    if volume:
+        venue_seg += (", " if venue_seg else "") + volume
+        if issue:
+            venue_seg += f"({issue})"
+    if pages:
+        if volume:
+            venue_seg += f":{pages}"
+        else:
+            venue_seg += (", " if venue_seg else "") + pages
+    if year:
+        venue_seg += f" ({year})" if venue_seg else year
+    if venue_seg:
+        seg0.append(venue_seg.rstrip(" ."))
+
+    cite = ". ".join([x for x in seg0 if x]).strip()
+    if cite and (not cite.endswith(".")):
+        cite += "."
+    return cite
+
+
+def _normalize_reference_for_popup(ref_rec: dict) -> dict:
+    if not isinstance(ref_rec, dict):
+        return {}
+    out = dict(ref_rec)
+    doi = str(out.get("doi") or "").strip()
+    title = str(out.get("title") or "").strip()
+    authors = str(out.get("authors") or "").strip()
+    venue = str(out.get("venue") or "").strip()
+    year = str(out.get("year") or "").strip()
+    volume = str(out.get("volume") or "").strip()
+    issue = str(out.get("issue") or "").strip()
+    pages = str(out.get("pages") or "").strip()
+
+    noisy_title = _looks_noisy_reference_title(title)
+    need_enrich = bool(doi and ((not authors) or (not venue) or noisy_title or (not year) or ((not volume) and (not pages))))
+    if need_enrich:
+        meta = _doi_enrich_meta_cached(doi, title_hint=("" if noisy_title else title))
+        if isinstance(meta, dict) and meta:
+            if noisy_title or (not title):
+                title = str(meta.get("title") or title).strip()
+            if not authors:
+                authors = str(meta.get("authors") or authors).strip()
+            if not venue:
+                venue = str(meta.get("venue") or venue).strip()
+            if not year:
+                year = str(meta.get("year") or year).strip()
+            if not volume:
+                volume = str(meta.get("volume") or volume).strip()
+            if not issue:
+                issue = str(meta.get("issue") or issue).strip()
+            if not pages:
+                pages = str(meta.get("pages") or pages).strip()
+            if not doi:
+                doi = str(meta.get("doi") or doi).strip()
+
+    out["title"] = title
+    out["authors"] = authors
+    out["venue"] = venue
+    out["year"] = year
+    out["volume"] = volume
+    out["issue"] = issue
+    out["pages"] = pages
+    out["doi"] = doi
+    out["cite_fmt"] = _format_reference_cite_line(out)
+    return out
+
+
 def _anchor_token(text: str) -> str:
     s = str(text or "").strip()
     if not s:
@@ -849,11 +976,12 @@ def _annotate_inpaper_citations_with_hover_meta(
         rec = detail_by_key.get(skey)
         if isinstance(rec, dict):
             return rec
-        raw_text = str(ref.get("raw") or "").strip()
-        doi_text = str(ref.get("doi") or "").strip()
+        ref2 = _normalize_reference_for_popup(ref or {})
+        raw_text = str(ref2.get("raw") or "").strip()
+        doi_text = str(ref2.get("doi") or "").strip()
         if (not doi_text) and raw_text:
             doi_text = str(extract_first_doi(raw_text) or "").strip()
-        doi_url = str(ref.get("doi_url") or "").strip()
+        doi_url = str(ref2.get("doi_url") or "").strip()
         if (not doi_url) and doi_text:
             doi_url = f"https://doi.org/{doi_text}"
         anchor = _build_inpaper_anchor(anchor_ns, int(n), source_name=source_name)
@@ -862,12 +990,16 @@ def _annotate_inpaper_citations_with_hover_meta(
             "anchor": anchor,
             "source_name": str(source_name or "").strip(),
             "raw": raw_text,
-            "title": str(ref.get("title") or "").strip(),
-            "authors": str(ref.get("authors") or "").strip(),
-            "venue": str(ref.get("venue") or "").strip(),
-            "year": str(ref.get("year") or "").strip(),
+            "title": str(ref2.get("title") or "").strip(),
+            "authors": str(ref2.get("authors") or "").strip(),
+            "venue": str(ref2.get("venue") or "").strip(),
+            "year": str(ref2.get("year") or "").strip(),
+            "volume": str(ref2.get("volume") or "").strip(),
+            "issue": str(ref2.get("issue") or "").strip(),
+            "pages": str(ref2.get("pages") or "").strip(),
             "doi": doi_text,
             "doi_url": doi_url,
+            "cite_fmt": str(ref2.get("cite_fmt") or "").strip(),
         }
         detail_by_key[skey] = rec
         return rec
@@ -1026,10 +1158,14 @@ def _render_inpaper_citation_details(
             "num": int(n),
             "source_name": str(rec.get("source_name") or "").strip(),
             "raw": str(rec.get("raw") or "").strip(),
+            "cite_fmt": str(rec.get("cite_fmt") or "").strip(),
             "title": str(rec.get("title") or "").strip(),
             "authors": str(rec.get("authors") or "").strip(),
             "venue": str(rec.get("venue") or "").strip(),
             "year": str(rec.get("year") or "").strip(),
+            "volume": str(rec.get("volume") or "").strip(),
+            "issue": str(rec.get("issue") or "").strip(),
+            "pages": str(rec.get("pages") or "").strip(),
             "doi": str(rec.get("doi") or "").strip(),
             "doi_url": str(rec.get("doi_url") or "").strip(),
         }

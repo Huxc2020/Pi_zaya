@@ -1071,11 +1071,15 @@ div[data-testid="stCode"] *::after,
 .msg-refs div[data-testid="stButton"] > button:disabled{
   opacity: 0.50 !important;
 }
+body.kb-cite-dragging{
+  user-select: none !important;
+  cursor: grabbing !important;
+}
 .kb-cite-pop{
   position: fixed;
   z-index: 10080;
-  max-width: min(460px, calc(100vw - 24px));
-  min-width: min(280px, calc(100vw - 24px));
+  max-width: min(500px, calc(100vw - 24px));
+  min-width: min(300px, calc(100vw - 24px));
   background: var(--panel);
   color: var(--text-main) !important;
   border: 1px solid var(--line);
@@ -1083,8 +1087,20 @@ div[data-testid="stCode"] *::after,
   box-shadow: 0 10px 30px rgba(0,0,0,0.24);
   padding: 10px 12px;
 }
+.kb-cite-pop-head{
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-right: 66px;
+  cursor: grab;
+}
+.kb-cite-pop-head:active{
+  cursor: grabbing;
+}
 .kb-cite-pop-title{
-  font-size: 0.80rem;
+  font-size: 0.84rem;
   font-weight: 700;
   color: var(--accent) !important;
   margin-bottom: 6px;
@@ -1108,20 +1124,175 @@ div[data-testid="stCode"] *::after,
   color: var(--accent) !important;
   text-decoration: underline;
 }
-.kb-cite-pop-close{
-  position: absolute;
-  top: 6px;
-  right: 8px;
+.kb-cite-pop-actions{
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.kb-cite-pop-add,
+.kb-cite-pop-open-shelf{
   border: 1px solid var(--btn-border);
   border-radius: 8px;
   background: var(--btn-bg);
   color: var(--btn-text);
-  width: 22px;
-  height: 22px;
-  line-height: 20px;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 0.80rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+.kb-cite-pop-add:hover,
+.kb-cite-pop-open-shelf:hover{
+  background: var(--btn-hover);
+}
+.kb-cite-pop-add{
+  background: var(--accent);
+  border-color: transparent;
+  color: #ffffff;
+}
+.kb-cite-pop-add:hover{
+  filter: brightness(0.94);
+}
+.kb-cite-pop-close{
+  position: absolute;
+  top: 0;
+  right: 0;
+  border: 1px solid var(--btn-border);
+  border-radius: 8px;
+  background: var(--btn-bg);
+  color: var(--btn-text);
+  width: 24px;
+  height: 24px;
+  line-height: 22px;
   text-align: center;
   font-size: 14px;
   cursor: pointer;
+}
+.kb-cite-shelf{
+  position: fixed;
+  z-index: 10070;
+  top: 66px;
+  right: 12px;
+  width: min(390px, calc(100vw - 20px));
+  max-height: calc(100vh - 88px);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 12px 34px rgba(0,0,0,0.20);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transform: translateX(calc(100% + 20px));
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 0.20s ease, opacity 0.20s ease;
+}
+.kb-cite-shelf.kb-open{
+  transform: translateX(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+.kb-cite-shelf-head{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.kb-cite-shelf-title{
+  font-size: 0.88rem;
+  font-weight: 760;
+  color: var(--text-main) !important;
+}
+.kb-cite-shelf-meta{
+  font-size: 0.78rem;
+  color: var(--text-soft) !important;
+}
+.kb-cite-shelf-head-actions{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.kb-cite-shelf-btn{
+  border: 1px solid var(--btn-border);
+  border-radius: 8px;
+  background: var(--btn-bg);
+  color: var(--btn-text);
+  height: 26px;
+  padding: 0 8px;
+  font-size: 0.76rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+.kb-cite-shelf-btn:hover{
+  background: var(--btn-hover);
+}
+.kb-cite-shelf-list{
+  padding: 10px 10px 12px;
+  overflow: auto;
+  min-height: 80px;
+  max-height: calc(100vh - 152px);
+}
+.kb-cite-shelf-empty{
+  font-size: 0.82rem;
+  color: var(--text-soft) !important;
+  padding: 10px 4px;
+}
+.kb-cite-shelf-item{
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: color-mix(in srgb, var(--panel) 86%, var(--bg));
+}
+.kb-cite-shelf-item-title{
+  font-size: 0.84rem;
+  font-weight: 670;
+  line-height: 1.35;
+  color: var(--text-main) !important;
+}
+.kb-cite-shelf-item-sub{
+  margin-top: 4px;
+  font-size: 0.78rem;
+  color: var(--text-soft) !important;
+  line-height: 1.34;
+}
+.kb-cite-shelf-item-links{
+  margin-top: 6px;
+  font-size: 0.78rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.kb-cite-shelf-item-links a{
+  color: var(--accent) !important;
+  text-decoration: underline;
+}
+.kb-cite-shelf-toggle{
+  position: fixed;
+  z-index: 10065;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: 1px solid var(--btn-border);
+  border-radius: 999px;
+  background: var(--btn-bg);
+  color: var(--btn-text);
+  height: 38px;
+  padding: 0 12px;
+  font-size: 0.80rem;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 8px 20px rgba(0,0,0,0.14);
+}
+.kb-cite-shelf.kb-open + .kb-cite-shelf-toggle{
+  opacity: 0;
+  pointer-events: none;
+}
+.kb-cite-shelf-toggle:hover{
+  background: var(--btn-hover);
 }
 .kb-inpaper-cite{
   display: inline;
@@ -1933,6 +2104,12 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
   let citeClickBound = false;
   let citeDocClick = null;
   let citeDocKey = null;
+  let citeLinkClick = null;
+  let citeDragMove = null;
+  let citeDragUp = null;
+  let citeShelfEl = null;
+  let citeShelfToggleEl = null;
+  const SHELF_KEY = "__kbCiteShelfStateV1";
 
   function escapeHtml(s) {{
     return String(s || "")
@@ -1943,13 +2120,241 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
       .replace(/'/g, "&#39;");
   }}
 
+  function safeUrl(s) {{
+    const u = String(s || "").trim();
+    if (!u) return "";
+    const low = u.toLowerCase();
+    if (low.startsWith("http://") || low.startsWith("https://")) return u;
+    return "";
+  }}
+
+  function shelfState() {{
+    try {{
+      const cur = host[SHELF_KEY];
+      if (cur && typeof cur === "object") {{
+        if (!Array.isArray(cur.items)) cur.items = [];
+        if (typeof cur.open !== "boolean") cur.open = false;
+        return cur;
+      }}
+    }} catch (e) {{}}
+    const init = {{ open: false, items: [] }};
+    try {{ host[SHELF_KEY] = init; }} catch (e) {{}}
+    return init;
+  }}
+
+  function shelfItemKey(rec) {{
+    if (!rec || typeof rec !== "object") return "";
+    const doiUrl = String(rec.doi_url || "").trim().toLowerCase();
+    const doi = String(rec.doi || "").trim().toLowerCase();
+    const src = String(rec.source_name || "").trim().toLowerCase();
+    const num = String(rec.num || "").trim();
+    const title = String(rec.title || rec.raw || "").trim().toLowerCase();
+    if (doiUrl) return "durl:" + doiUrl;
+    if (doi) return "doi:" + doi;
+    return "ref:" + src + "|" + num + "|" + title;
+  }}
+
+  function normalizeShelfItem(payload) {{
+    if (!payload || typeof payload !== "object") return null;
+    const num0 = Number(payload.num || 0);
+    const num = isFinite(num0) && num0 > 0 ? Math.floor(num0) : 0;
+    const sourceName = String(payload.source_name || "").trim();
+    const citeFmt = String(payload.cite_fmt || "").trim();
+    const title = String(payload.title || "").trim();
+    const authors = String(payload.authors || "").trim();
+    const raw = String(payload.raw || "").trim();
+    const venue = String(payload.venue || "").trim();
+    const year = String(payload.year || "").trim();
+    const volume = String(payload.volume || "").trim();
+    const issue = String(payload.issue || "").trim();
+    const pages = String(payload.pages || "").trim();
+    const doi = String(payload.doi || "").trim();
+    const doiUrl0 = safeUrl(String(payload.doi_url || "").trim());
+    const doiUrl = doiUrl0 || (doi ? ("https://doi.org/" + doi) : "");
+    const main = citeFmt || title || raw || "(no reference text)";
+    const rec = {{
+      num: num,
+      source_name: sourceName,
+      cite_fmt: citeFmt,
+      title: title,
+      authors: authors,
+      raw: raw,
+      venue: venue,
+      year: year,
+      volume: volume,
+      issue: issue,
+      pages: pages,
+      doi: doi,
+      doi_url: doiUrl,
+      main: main,
+    }};
+    rec.key = shelfItemKey(rec);
+    return rec;
+  }}
+
+  function clearCiteDrag() {{
+    try {{
+      if (citeDragMove) doc.removeEventListener("mousemove", citeDragMove, true);
+      if (citeDragUp) doc.removeEventListener("mouseup", citeDragUp, true);
+    }} catch (e) {{}}
+    citeDragMove = null;
+    citeDragUp = null;
+    try {{
+      if (doc.body) doc.body.classList.remove("kb-cite-dragging");
+    }} catch (e) {{}}
+  }}
+
   function closeCitePopup() {{
+    clearCiteDrag();
     try {{
       if (citePopup && citePopup.parentNode) {{
         citePopup.parentNode.removeChild(citePopup);
       }}
     }} catch (e) {{}}
     citePopup = null;
+  }}
+
+  function removeCiteShelfDom() {{
+    try {{
+      if (citeShelfEl && citeShelfEl.parentNode) citeShelfEl.parentNode.removeChild(citeShelfEl);
+    }} catch (e) {{}}
+    try {{
+      if (citeShelfToggleEl && citeShelfToggleEl.parentNode) citeShelfToggleEl.parentNode.removeChild(citeShelfToggleEl);
+    }} catch (e) {{}}
+    citeShelfEl = null;
+    citeShelfToggleEl = null;
+  }}
+
+  function ensureCiteShelfDom() {{
+    if (citeShelfEl && citeShelfToggleEl && citeShelfEl.isConnected && citeShelfToggleEl.isConnected) return;
+    removeCiteShelfDom();
+    try {{
+      const panel = doc.createElement("aside");
+      panel.className = "kb-cite-shelf";
+      panel.innerHTML =
+        '<div class="kb-cite-shelf-head">' +
+          '<div>' +
+            '<div class="kb-cite-shelf-title">文献篮</div>' +
+            '<div class="kb-cite-shelf-meta">已收藏 <span class="kb-cite-shelf-count">0</span> 条</div>' +
+          '</div>' +
+          '<div class="kb-cite-shelf-head-actions">' +
+            '<button type="button" class="kb-cite-shelf-btn kb-cite-shelf-clear">清空</button>' +
+            '<button type="button" class="kb-cite-shelf-btn kb-cite-shelf-close" aria-label="Close">×</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="kb-cite-shelf-list"></div>';
+
+      const toggle = doc.createElement("button");
+      toggle.type = "button";
+      toggle.className = "kb-cite-shelf-toggle";
+      toggle.textContent = "文献篮";
+
+      doc.body.appendChild(panel);
+      doc.body.appendChild(toggle);
+      citeShelfEl = panel;
+      citeShelfToggleEl = toggle;
+
+      const closeBtn = panel.querySelector(".kb-cite-shelf-close");
+      if (closeBtn) {{
+        closeBtn.addEventListener("click", function (e) {{
+          e.preventDefault();
+          e.stopPropagation();
+          const st0 = shelfState();
+          st0.open = false;
+          renderCiteShelf();
+        }});
+      }}
+      const clearBtn = panel.querySelector(".kb-cite-shelf-clear");
+      if (clearBtn) {{
+        clearBtn.addEventListener("click", function (e) {{
+          e.preventDefault();
+          e.stopPropagation();
+          const st0 = shelfState();
+          st0.items = [];
+          renderCiteShelf();
+        }});
+      }}
+      toggle.addEventListener("click", function (e) {{
+        e.preventDefault();
+        e.stopPropagation();
+        const st0 = shelfState();
+        st0.open = !Boolean(st0.open);
+        renderCiteShelf();
+      }});
+    }} catch (e) {{}}
+  }}
+
+  function renderCiteShelf() {{
+    ensureCiteShelfDom();
+    if (!citeShelfEl) return;
+    const st0 = shelfState();
+    const items = Array.isArray(st0.items) ? st0.items : [];
+    try {{
+      citeShelfEl.classList.toggle("kb-open", Boolean(st0.open));
+      if (citeShelfToggleEl) citeShelfToggleEl.classList.toggle("kb-open", Boolean(st0.open));
+    }} catch (e) {{}}
+    try {{
+      const countEl = citeShelfEl.querySelector(".kb-cite-shelf-count");
+      if (countEl) countEl.textContent = String(items.length);
+      const listEl = citeShelfEl.querySelector(".kb-cite-shelf-list");
+      if (!listEl) return;
+      if (!items.length) {{
+        listEl.innerHTML = '<div class="kb-cite-shelf-empty">从文内引用弹窗点击“加入文献篮”，这里会保存文献摘要和 DOI 链接。</div>';
+        return;
+      }}
+      let htmlParts = "";
+      for (const it of items) {{
+        if (!it || typeof it !== "object") continue;
+        const main = escapeHtml(String(it.main || it.title || it.raw || ""));
+        const sourceName = escapeHtml(String(it.source_name || ""));
+        const venue = escapeHtml(String(it.venue || ""));
+        const year = escapeHtml(String(it.year || ""));
+        const doi = escapeHtml(String(it.doi || ""));
+        const doiUrl = safeUrl(String(it.doi_url || ""));
+        const num = Number(it.num || 0);
+        const head = (isFinite(num) && num > 0) ? ("[" + String(num) + "] ") : "";
+        let sub = "";
+        if (sourceName) sub += "source: " + sourceName;
+        if (venue) sub += (sub ? " | " : "") + venue;
+        if (year) sub += (sub ? " | " : "") + year;
+        htmlParts += '<div class="kb-cite-shelf-item">';
+        htmlParts += '<div class="kb-cite-shelf-item-title">' + head + main + '</div>';
+        if (sub) htmlParts += '<div class="kb-cite-shelf-item-sub">' + sub + '</div>';
+        htmlParts += '<div class="kb-cite-shelf-item-links">';
+        if (doiUrl) {{
+          htmlParts += 'DOI: <a href="' + escapeHtml(doiUrl) + '" target="_blank" rel="noopener noreferrer">' + (doi || escapeHtml(doiUrl)) + '</a>';
+        }} else {{
+          htmlParts += '<span>无 DOI 链接</span>';
+        }}
+        htmlParts += '</div></div>';
+      }}
+      listEl.innerHTML = htmlParts;
+    }} catch (e) {{}}
+  }}
+
+  function openCiteShelf() {{
+    const st0 = shelfState();
+    st0.open = true;
+    renderCiteShelf();
+  }}
+
+  function addToCiteShelf(payload) {{
+    const item = normalizeShelfItem(payload);
+    if (!item) {{
+      openCiteShelf();
+      return;
+    }}
+    const st0 = shelfState();
+    const cur = Array.isArray(st0.items) ? st0.items.slice() : [];
+    const key = String(item.key || "");
+    const next = cur.filter(function (x) {{
+      if (!x || typeof x !== "object") return false;
+      return String(shelfItemKey(x) || "") !== key;
+    }});
+    next.unshift(item);
+    st0.items = next.slice(0, 120);
+    st0.open = true;
+    renderCiteShelf();
   }}
 
   function findCitePayload(anchorId) {{
@@ -1974,17 +2379,48 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
   function renderCitePopup(payload, x, y) {{
     if (!payload || typeof payload !== "object") return;
     closeCitePopup();
+    renderCiteShelf();
 
     const num = Number(payload.num || 0);
+    const citeFmt = String(payload.cite_fmt || "");
     const sourceName = String(payload.source_name || "");
     const title = String(payload.title || "");
+    const authors = String(payload.authors || "");
     const raw = String(payload.raw || "");
     const venue = String(payload.venue || "");
     const year = String(payload.year || "");
+    const volume = String(payload.volume || "");
+    const issue = String(payload.issue || "");
+    const pages = String(payload.pages || "");
     const doi = String(payload.doi || "");
     const doiUrl = String(payload.doi_url || "");
 
-    const main = title || raw || "(no reference text)";
+    function trimLine(s, maxLen) {{
+      const t = String(s || "").replace(/\s+/g, " ").trim();
+      if (t.length <= maxLen) return t;
+      return t.slice(0, Math.max(0, maxLen - 3)).trimEnd() + "...";
+    }}
+
+    let main = String(citeFmt || "").trim();
+    if (!main) {{
+      const segs = [];
+      if (authors) segs.push(authors);
+      if (title) segs.push(title);
+      let venueSeg = venue;
+      if (volume) {{
+        venueSeg += (venueSeg ? ", " : "") + volume;
+        if (issue) venueSeg += "(" + issue + ")";
+      }}
+      if (pages) {{
+        if (volume) venueSeg += ":" + pages;
+        else venueSeg += (venueSeg ? ", " : "") + pages;
+      }}
+      if (year) venueSeg += (venueSeg ? " (" + year + ")" : year);
+      if (venueSeg) segs.push(venueSeg);
+      main = segs.join(". ").trim();
+      if (main && !/[.!?]$/.test(main)) main += ".";
+    }}
+    if (!main) main = trimLine(raw, 420) || "(no reference text)";
     const subParts = [];
     if (sourceName) subParts.push("source: " + sourceName);
     if (venue) subParts.push(venue);
@@ -1994,26 +2430,67 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
     const pop = doc.createElement("div");
     pop.className = "kb-cite-pop";
     pop.innerHTML =
-      '<button type="button" class="kb-cite-pop-close" aria-label="Close">×</button>' +
+      '<div class="kb-cite-pop-head">' +
       '<div class="kb-cite-pop-title">[' + (isFinite(num) && num > 0 ? String(num) : "?") + "] 文内参考</div>" +
+      '<button type="button" class="kb-cite-pop-close" aria-label="Close">×</button>' +
+      '</div>' +
       '<div class="kb-cite-pop-main">' + escapeHtml(main) + "</div>" +
       (sub ? ('<div class="kb-cite-pop-sub">' + escapeHtml(sub) + "</div>") : "") +
       (doiUrl
         ? ('<div class="kb-cite-pop-doi">DOI: <a href="' + escapeHtml(doiUrl) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(doi || doiUrl) + "</a></div>")
-        : "");
+        : "") +
+      '<div class="kb-cite-pop-actions">' +
+      '<button type="button" class="kb-cite-pop-open-shelf">打开文献篮</button>' +
+      '<button type="button" class="kb-cite-pop-add">加入文献篮</button>' +
+      '</div>';
 
     doc.body.appendChild(pop);
     citePopup = pop;
 
-    const vw = Math.max(0, host.innerWidth || doc.documentElement.clientWidth || 0);
-    const vh = Math.max(0, host.innerHeight || doc.documentElement.clientHeight || 0);
-    const rect = pop.getBoundingClientRect();
-    let left = Math.max(8, Number(x || 0) + 12);
-    let top = Math.max(8, Number(y || 0) + 12);
-    if (left + rect.width > vw - 8) left = Math.max(8, vw - rect.width - 8);
-    if (top + rect.height > vh - 8) top = Math.max(8, Number(y || 0) - rect.height - 10);
-    pop.style.left = Math.round(left) + "px";
-    pop.style.top = Math.round(top) + "px";
+    function clampPopup(left0, top0) {{
+      const vvW = Math.max(0, host.innerWidth || doc.documentElement.clientWidth || 0);
+      const vvH = Math.max(0, host.innerHeight || doc.documentElement.clientHeight || 0);
+      const rr = pop.getBoundingClientRect();
+      let leftX = Math.max(8, Number(left0 || 0));
+      let topY = Math.max(8, Number(top0 || 0));
+      if (leftX + rr.width > vvW - 8) leftX = Math.max(8, vvW - rr.width - 8);
+      if (topY + rr.height > vvH - 8) topY = Math.max(8, vvH - rr.height - 8);
+      return {{ left: leftX, top: topY }};
+    }}
+
+    const pos0 = clampPopup(Math.max(8, Number(x || 0) + 12), Math.max(8, Number(y || 0) + 12));
+    pop.style.left = Math.round(pos0.left) + "px";
+    pop.style.top = Math.round(pos0.top) + "px";
+
+    try {{
+      const head = pop.querySelector(".kb-cite-pop-head");
+      if (head) {{
+        head.addEventListener("mousedown", function (ev) {{
+          if (Number(ev.button || 0) !== 0) return;
+          const target = ev.target;
+          if (target && target.closest && target.closest("button, a, input, textarea, select, label")) return;
+          ev.preventDefault();
+          ev.stopPropagation();
+          const rr = pop.getBoundingClientRect();
+          const dx = Number(ev.clientX || 0) - rr.left;
+          const dy = Number(ev.clientY || 0) - rr.top;
+          clearCiteDrag();
+          citeDragMove = function (mv) {{
+            const p1 = clampPopup(Number(mv.clientX || 0) - dx, Number(mv.clientY || 0) - dy);
+            pop.style.left = Math.round(p1.left) + "px";
+            pop.style.top = Math.round(p1.top) + "px";
+          }};
+          citeDragUp = function () {{
+            clearCiteDrag();
+          }};
+          doc.addEventListener("mousemove", citeDragMove, true);
+          doc.addEventListener("mouseup", citeDragUp, true);
+          try {{
+            if (doc.body) doc.body.classList.add("kb-cite-dragging");
+          }} catch (e) {{}}
+        }}, true);
+      }}
+    }} catch (e) {{}}
 
     try {{
       const closeBtn = pop.querySelector(".kb-cite-pop-close");
@@ -2024,6 +2501,22 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
           closeCitePopup();
         }});
       }}
+      const openBtn = pop.querySelector(".kb-cite-pop-open-shelf");
+      if (openBtn) {{
+        openBtn.addEventListener("click", function (e) {{
+          e.preventDefault();
+          e.stopPropagation();
+          openCiteShelf();
+        }});
+      }}
+      const addBtn = pop.querySelector(".kb-cite-pop-add");
+      if (addBtn) {{
+        addBtn.addEventListener("click", function (e) {{
+          e.preventDefault();
+          e.stopPropagation();
+          addToCiteShelf(payload);
+        }});
+      }}
     }} catch (e) {{}}
   }}
 
@@ -2031,7 +2524,7 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
     if (citeClickBound) return;
     citeClickBound = true;
 
-    doc.addEventListener("click", function (e) {{
+    citeLinkClick = function (e) {{
       try {{
         const target = e.target;
         const a = target && target.closest ? target.closest("a[href^='#kb-cite-']") : null;
@@ -2047,7 +2540,8 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
         const y = Number(e.clientY || 0);
         renderCitePopup(payload, x, y);
       }} catch (err) {{}}
-    }}, true);
+    }};
+    doc.addEventListener("click", citeLinkClick, true);
 
     citeDocClick = function (e) {{
       if (!citePopup) return;
@@ -2084,10 +2578,14 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
 
   function destroy() {{
     closeCitePopup();
+    clearCiteDrag();
+    removeCiteShelfDom();
     try {{ if (mo) mo.disconnect(); }} catch (e) {{}}
     try {{ if (raf) host.cancelAnimationFrame(raf); }} catch (e) {{}}
+    try {{ if (citeLinkClick) doc.removeEventListener("click", citeLinkClick, true); }} catch (e) {{}}
     try {{ if (citeDocClick) doc.removeEventListener("click", citeDocClick, true); }} catch (e) {{}}
     try {{ if (citeDocKey) doc.removeEventListener("keydown", citeDocKey, true); }} catch (e) {{}}
+    citeLinkClick = null;
     citeDocClick = null;
     citeDocKey = null;
     citeClickBound = false;
@@ -2098,6 +2596,7 @@ def _inject_runtime_ui_fixes(theme_mode: str) -> None:
   schedule();
   observe();
   bindCitationPopover();
+  renderCiteShelf();
 }})();
 </script>
         """,
