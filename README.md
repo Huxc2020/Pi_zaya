@@ -1,189 +1,153 @@
-# kb_chat
+﻿# Pi_zaya / kb_chat
 
-这份 README 是我写给你（合作者）看的：帮你在**你自己的电脑**上跑起来 kb_chat，并且用**你自己的 PDF/目录**，同时我这边更新代码后你也能很快用到最新版。
+这份 README 是我（开发者）写给使用者的。目标是让你在自己的电脑上，稳定地把 PDF 转成 Markdown、更新知识库，并在对话里可追溯引用。
+
+## 你可以用它做什么
+
+- 在「文献管理」页批量上传 PDF，并转换为 Markdown（含图片、公式、参考文献处理）。
+- 一键「更新知识库」，把 Markdown 分块索引到本地 DB。
+- 在「对话」页基于知识库检索回答，并显示可点击的文内引用 `[n]`。
+- 点击引用可弹出文献信息（来源、题录、DOI 链接）。
+- 可将引用加入右侧「文献篮」，集中查看并跳转 DOI 页面。
+- 参考文献索引支持后台 Crossref 同步，不阻塞页面使用。
 
 ---
 
-## 0) 你需要准备什么
+## 当前默认模型（我现在使用）
 
-在 Windows 上：
-- Git（能在 PowerShell 里运行 `git`）
-- Python（建议 3.10+；Anaconda 也可以，只要命令行里能用 `python`）
-- 一个 DeepSeek API Key（我不会让你把 key 写进代码）
+本项目当前优先使用 **Qwen**（OpenAI 兼容接口）：
+
+- 默认 `QWEN_BASE_URL`: `https://dashscope.aliyuncs.com/compatible-mode/v1`
+- 默认 `QWEN_MODEL`: `qwen3-vl-plus`
+
+代码逻辑是：
+
+1. 优先读 `QWEN_API_KEY`
+2. 否则回退 `DEEPSEEK_API_KEY`
+3. 再回退 `OPENAI_API_KEY`
+
+所以你只要设置 `QWEN_API_KEY`，就会走 Qwen。
 
 ---
 
-## 1) 一键启动（推荐）
+## 快速启动（Windows）
 
-第一次启动会自动：
-- 创建虚拟环境 `.venv`
-- 安装依赖
-- 启动网页（Streamlit）
-
-### 1.1 克隆代码
+### 1) 克隆项目
 
 ```powershell
 git clone https://github.com/LittlePyx/Pi_zaya.git
 cd Pi_zaya
 ```
 
-### 1.2 配置你的 API Key（PowerShell）
+### 2) 设置 Qwen API Key（当前推荐）
 
 ```powershell
-$env:DEEPSEEK_API_KEY="你的key"
+$env:QWEN_API_KEY="你的key"
 ```
 
-（可选）如果你想改模型/地址：
+可选（一般不用改）：
 
 ```powershell
-$env:DEEPSEEK_BASE_URL="https://api.deepseek.com/v1"
-$env:DEEPSEEK_MODEL="deepseek-chat"
+$env:QWEN_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
+$env:QWEN_MODEL="qwen3-vl-plus"
 ```
 
-### 1.3 启动
-
-双击 `run.cmd` 即可。  
-或在 PowerShell 里运行：
+### 3) 启动
 
 ```powershell
 .\run.ps1
 ```
 
-启动后在浏览器打开提示的地址（默认是 `http://127.0.0.1:8501`）。
+或双击 `run.cmd`。
+
+脚本会自动：
+
+- 创建 `.venv`（若不存在）
+- 安装 `requirements.txt`
+- 启动 Streamlit（默认 `http://127.0.0.1:8501`）
 
 ---
 
-## 2) 用你自己的 PDF/目录（每个人独立）
+## 标准使用流程
 
-打开网页后，在左侧「设置」里把路径改成你自己的：
-- `PDF 路径`：你存放 PDF 的根目录
-- `DB 路径 / MD 路径`：你自己的知识库 Markdown 目录（或你建库时使用的 db 目录）
-
-（可选）你也可以用环境变量直接指定默认 PDF 目录（不改 UI 也能生效）：
-
-```powershell
-$env:KB_PDF_DIR="D:\\papers"
-```
-
-这些设置只会写在你电脑本地的 `user_prefs.json`，不会影响我，也不会被更新覆盖。
-
----
-
-## 2.2) 第一次建库（不然会提示 DB 为空）
-
-第一次跑起来后，知识库 DB 默认是空的（还没有 chunks），这是正常的。你需要：
-1) 去左侧切到「文献管理」
-2) 设置你的 `PDF 路径`、`输出目录（Markdown）`、`DB 路径`
-3) 先把 PDF 转成 MD（单篇或批量）
-4) 点「更新知识库」
-
-完成后回到「对话」页，再问问题就能正常做“参考定位”了。
+1. 打开「文献管理」页。
+2. 设置：
+   - `文献目录（PDF）`
+   - `输出目录（Markdown）`
+3. 上传 PDF（支持批量）。
+4. 选择转换模式：
+   - `normal`：质量优先（截图识别 + VL）
+   - `ultra_fast`：更快，质量略降
+   - `no_llm`：不使用多模态模型（基础提取）
+5. 点击「更新知识库」。
+6. 回到「对话」页提问。
 
 ---
 
-## 2.1) 转 MD 的效果怎么和我一致
+## 引用与文献篮
 
-这个项目的 PDF→Markdown 转换器已经跟代码一起放在仓库里：`pdf_to_md.py`。  
-你在网页里点“转换/批量转换”时，会优先调用它，所以只要你拉到最新版，转换逻辑和我的是同一份代码。
+在回答里看到 `[n]` 后：
 
-想要“效果和我一样”，关键是你在同一个开关组合下跑：
-- 如果我这边也勾选了“**不用 LLM（更快）**”，那你也勾选（不需要 API Key 也能转，但数学公式/表格可能没那么干净）。
-- 如果我这边取消了“**不用 LLM（更快）**”（更准），那你也要取消，并在启动前设置：
-  - `DEEPSEEK_API_KEY`
-  - （可选）`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`
+- 点击 `[n]` 会弹出引用详情（支持拖动）。
+- 可直接打开 DOI。
+- 可「加入文献篮」。
+- 文献篮会在右侧汇总，支持定位与高亮条目。
 
----
-
-## 3) 我更新代码后，你怎么拿到最新版
-
-你以后每次启动都建议走 `run.cmd` / `run.ps1`：
-- 如果你的目录是通过 `git clone` 得来的，`run.ps1` 会在启动前自动 `git pull`（有 git 的情况下）
-- 然后再启动 Streamlit
-
-如果你想手动更新也可以（推荐在启动前做一次）：
-
-```powershell
-git pull --rebase
-```
-
-如果你也参与一起改代码（协作开发），请用 “分支 + PR” 的方式，避免直接在 `main` 上改：
-
-```powershell
-# 先切到 main 并拉最新
-git checkout main
-git pull --rebase
-
-# 开新分支做改动
-git checkout -b feature/your-change
-
-# 改完提交并推送分支
-git add .
-git commit -m "your change"
-git push -u origin feature/your-change
-```
-
-然后去 GitHub 页面发起 Pull Request（PR），我会 review 后合并。
+说明：不是每条参考文献都一定有 DOI（历史文献、会议条目、源数据缺失时常见）。
 
 ---
 
-## 4)（可选）让同一局域网的其它设备也能访问你这台电脑
+## 常用环境变量
 
-默认只允许本机访问（安全）：`127.0.0.1:8501`  
-如果你需要同一 Wi‑Fi 下其它设备访问（不建议在公共 Wi‑Fi 开）：
+### 模型相关
 
-```powershell
-$env:KB_STREAMLIT_ADDR="0.0.0.0"
-.\run.ps1
-```
+- `QWEN_API_KEY`
+- `QWEN_BASE_URL`
+- `QWEN_MODEL`
+- `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL`（回退）
+- `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL`（回退）
 
-端口也可改：
+### 路径与服务
 
-```powershell
-$env:KB_STREAMLIT_PORT="8501"
-.\run.ps1
-```
+- `KB_PDF_DIR`：默认 PDF 根目录
+- `KB_MD_DIR`：默认 Markdown 目录
+- `KB_DB_DIR`：知识库索引目录
+- `KB_CHAT_DB`：对话数据库路径
+- `KB_LIBRARY_DB`：文献库数据库路径
+- `KB_STREAMLIT_ADDR`：默认 `127.0.0.1`
+- `KB_STREAMLIT_PORT`：默认 `8501`
+
+### 参考文献索引
+
+- `KB_CROSSREF_BUDGET_S`：Crossref 后台同步预算秒数（默认 45）
 
 ---
-
-## 5)在项目根目录下，使用以下命令运行所有测试：
-
-```powershell
-pytest tests/
-```
-或者运行特定模块：
-
-```powershell
-pytest tests/unit/test_chunking.py
-```
-建议在每次每次修改核心逻辑与代码提交前运行 pytest，同时计划为新功能模块配套对应的测试文件。
 
 ## 常见问题
 
-### 1) 报错 401 / key 无效
+### 1) 页面一直 Running
 
-检查你是否在当前 PowerShell 里设置了 key：
+通常是前端脚本缓存或后台任务异常。建议：
 
-```powershell
-echo $env:DEEPSEEK_API_KEY
-```
+1. 重启 Streamlit
+2. 浏览器 `Ctrl+F5` 强刷
+3. 再看「文献管理」页中的后台状态
 
-再重新设置：
+### 2) 为什么有的引用没有 DOI
 
-```powershell
-$env:DEEPSEEK_API_KEY="你的正确key"
-```
+可能原因：
 
-### 2) 运行 `run.cmd` 说找不到 python
+- 文献本身未注册 DOI
+- 参考文献条目不完整或噪声大
+- Crossref 未命中
 
-说明你的系统 PATH 里没有 `python`。解决方式：
-- 安装 Python 后勾选 “Add Python to PATH”
-- 或用 Anaconda Prompt 启动（确保 `python` 可用）
+### 3) 更新知识库后对话没变化
 
-### 3) 运行 `run.ps1` 提示执行策略阻止
+请确认你更新的是当前使用的 `DB` 目录，并且 Markdown 文件确实已生成到对应目录。
 
-你可以继续用 `run.cmd`（它会用 Bypass 启动 PowerShell），或在管理员 PowerShell 里设置一次：
+---
 
-```powershell
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-```
+## 给使用者的说明
 
+- 这个项目目前是我持续迭代中的版本，界面和细节会更新。
+- 你遇到“可复现”的问题时，附上：PDF 名称、页面截图、生成的 `.md` 片段，我可以更快定位并修复。
