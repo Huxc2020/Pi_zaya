@@ -12,6 +12,33 @@ import requests
 _DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Za-z0-9]+\b", flags=re.IGNORECASE)
 _WS_RE = re.compile(r"\s+")
 _YEAR_RE = re.compile(r"^(19\d{2}|20\d{2})$")
+_YEAR_INLINE_RE = re.compile(r"(?:^|[\s,(])((19|20)\d{2})(?:[\s,);.]|$)")
+
+
+def extract_year_hint(text: str) -> str:
+    s = (text or "").strip()
+    if not s:
+        return ""
+    m = _YEAR_INLINE_RE.search(s)
+    return m.group(1) if m else ""
+
+
+def extract_first_author_family_hint(text: str) -> str:
+    s = (text or "").strip()
+    if not s:
+        return ""
+    # Take text before first comma or opening paren as likely first author surname
+    chunk = re.split(r"[,(]", s, maxsplit=1)[0].strip()
+    # Remove leading reference numbers like "[1]" or "1."
+    chunk = re.sub(r"^\[?\d+[.\])\s]+", "", chunk).strip()
+    # Take the first word-like token as family name
+    tokens = chunk.split()
+    if not tokens:
+        return ""
+    name = tokens[0].rstrip(".,;:")
+    if len(name) < 2 or name.isdigit():
+        return ""
+    return name.lower()
 
 
 def normalize_title_for_match(title: str) -> str:
@@ -256,3 +283,53 @@ def fetch_best_crossref_meta(
     out["title_similarity"] = round(best_title_sim, 4)
     out["match_score"] = round(best_score, 4)
     return out
+
+
+def is_promising_reference_text(text: str) -> bool:
+    s = (text or "").strip()
+    if len(s) < 12:
+        return False
+    has_year = bool(_YEAR_INLINE_RE.search(s))
+    has_doi = bool(_DOI_RE.search(s))
+    has_punct = sum(1 for c in s if c in ".,;:") >= 2
+    return has_doi or (has_year and has_punct)
+
+
+@lru_cache(maxsize=256)
+def fetch_crossref_references_by_doi(doi: str) -> list[dict[str, Any]]:
+    d = _clean_doi(doi)
+    if not d:
+        return []
+    item = _crossref_get_work_by_doi(d)
+    if not item:
+        return []
+    refs = item.get("reference", [])
+    if not isinstance(refs, list):
+        return []
+    return [r for r in refs if isinstance(r, dict)]
+
+
+def fetch_best_crossref_for_reference(
+    *, reference_text: str, min_score: float = 0.62,
+) -> dict[str, Any] | None:
+    raw = (reference_text or "").strip()
+    if not raw:
+        return None
+    doi = extract_first_doi(raw)
+    if doi:
+        item = _crossref_get_work_by_doi(doi)
+        if item:
+            meta = _meta_from_item(item)
+            out = dict(meta)
+            out["match_method"] = "doi"
+            out["match_score"] = 0.99
+            return out
+    # Fall back to title search
+    # Extract a plausible title: text after year or after first period
+    title = raw
+    parts = re.split(r"[.?!]\s+", raw, maxsplit=2)
+    if len(parts) >= 2:
+        title = parts[1] if len(parts[1]) > 15 else raw
+    return fetch_best_crossref_meta(
+        query_title=title, min_score=min_score, allow_title_only=True,
+    )
