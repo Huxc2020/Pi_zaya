@@ -21,4 +21,8 @@ db/
 Thumbs.db
 
 DBnew/
-db/
+chat.*
+CLAUDE.md
+web/dist
+web/node_modules
+.claude
